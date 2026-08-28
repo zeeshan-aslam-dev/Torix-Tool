@@ -25,8 +25,10 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
-# local env files
+# local env files — .env holds live API keys, never commit it
+.env
 .env*.local
+!.env.example
 
 # vercel
 .vercel
@@ -34,3 +36,10 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+/src/generated/prisma
+
+# large NPPES source files dropped into /data
+/data/*
+!/data/.gitkeep
+!/data/README.md

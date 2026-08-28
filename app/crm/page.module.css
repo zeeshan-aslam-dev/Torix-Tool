@@ -1,0 +1,49 @@
+.tableContainer {
+  overflow-x: auto;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.tag {
+  display: inline-flex;
+  padding: 4px 8px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.tagHot {
+  background: rgba(16, 185, 129, 0.1);
+  color: var(--status-hot);
+  border: 1px solid rgba(16, 185, 129, 0.2);
+}
+
+.tagVerify {
+  background: rgba(245, 158, 11, 0.1);
+  color: var(--status-verify);
+  border: 1px solid rgba(245, 158, 11, 0.2);
+}
+
+.tagExclude {
+  background: rgba(239, 68, 68, 0.1);
+  color: var(--status-exclude);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+}
+
+.link {
+  color: var(--brand-primary);
+  text-decoration: underline;
+}
+
+.filters {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 24px;
+}

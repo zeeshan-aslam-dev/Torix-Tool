@@ -1,0 +1,145 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Lead {
+  id                      Int           @id @default(autoincrement())
+
+  /// Stable identity of one practice location: normalised org name + address.
+  /// Imports upsert on this, so re-running never orphans a contact or an
+  /// outreach record the way a delete-and-reinsert did.
+  leadKey                 String?       @unique
+
+  organization            String
+  address                 String
+  city                    String
+  state                   String
+  zip                     String
+  npi                     String?
+  taxonomy                String?
+  n_locations_detected    Int           @default(0)
+  n_providers_at_location Int           @default(0)
+
+  // Straight from NPPES, captured during Step 1 so scoring and the dialer
+  // do not need a second pass over the 11GB source file.
+  entityType              String?       // "1" = individual provider, "2" = organization
+  phone                   String?
+  fax                     String?
+  authorizedOfficialName  String?
+  authorizedOfficialTitle String?
+  authorizedOfficialPhone String?
+  lastUpdateDate          DateTime?
+  enumerationDate         DateTime?
+  isSoleProprietor        String?
+  isOrganizationSubpart   String?
+  parentOrganizationLbn   String?
+
+  tag                     String?       // HOT, VERIFY, EXCLUDE
+  reason                  String?
+  score                   Int           @default(0)
+  scoredAt                DateTime?
+  website_found           String?
+  websiteSource           String?       // endpoint, guess, serpapi
+  websiteConfidence       Int?          // 0-100, how well the page matched the lead
+  websiteCheckedAt        DateTime?
+  possible_acquisition    Boolean       @default(false)
+  search_snippet          String?
+  dbaNames                String?       // trade names from othername_pfile
+  
+  contact                 Contact?
+  outreach                Outreach?
+  logs                    ResponseLog[]
+
+  createdAt               DateTime      @default(now())
+  updatedAt               DateTime      @updatedAt
+
+  @@index([state])
+  @@index([tag])
+  @@index([score])
+  @@index([npi])
+  @@index([city])
+}
+
+model Contact {
+  id                    Int      @id @default(autoincrement())
+  leadId                Int      @unique
+  lead                  Lead     @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  decisionMakerName     String?
+  decisionMakerTitle    String?
+  decisionMakerEmail    String?
+  decisionMakerLinkedIn String?
+  decisionMakerPhone    String?
+  emailSource           String?   // nppes, website
+  emailConfidence       Int?      // 0-100
+  contactCheckedAt      DateTime?
+
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+}
+
+model Outreach {
+  id             Int      @id @default(autoincrement())
+  leadId         Int      @unique
+  lead           Lead     @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  emailStatus    String?  @default("Not sent") // Not sent, Queued, Sent, Opened, Replied, Bounced
+  emailCampaign  String?   // Instantly campaign id, or the export batch that carried it
+  exportedAt     DateTime?
+  emailDate      DateTime?
+  linkedInStatus String?  @default("Not sent") // Not sent, Sent, Seen, Replied
+  linkedInDate   DateTime?
+  callStatus     String?  @default("Not called") // Not called, Attempted, Reached, Gatekeeper, No answer
+  callDate       DateTime?
+  voicemailStatus String? @default("Not sent") // Not sent, Sent, Callback
+  voicemailDate  DateTime?
+  
+  pipelineStage  String   @default("New") // New, Contacted, Responded, Meeting Booked, Proposal Sent, Won, Lost
+  
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}
+
+model ResponseLog {
+  id        Int      @id @default(autoincrement())
+  leadId    Int
+  lead      Lead     @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  channel   String   // Email, Call, LinkedIn, Note
+  content   String
+  date      DateTime @default(now())
+}
+
+model Client {
+  id                  Int      @id @default(autoincrement())
+  organization        String
+  contractStartDate   DateTime?
+  billingTerms        String?
+  amountBilled        Float    @default(0.0)
+  amountPaid          Float    @default(0.0)
+  outstandingBalance  Float    @default(0.0)
+  
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+}
+
+
+/// Permanent record of practices and addresses that have already been contacted.
+///
+/// Deliberately holds no relation to Lead: a re-import, a reset, even a dropped
+/// database table must not be able to erase the fact that someone was mailed.
+/// The send step checks this before every push.
+model Suppression {
+  id        Int      @id @default(autoincrement())
+  kind      String   // email | practice
+  value     String   // lowercased address, or the lead's leadKey
+  reason    String   // sent | queued | bounced | unsubscribed | manual
+  note      String?
+  firstSeen DateTime @default(now())
+  lastSeen  DateTime @updatedAt
+
+  @@unique([kind, value])
+  @@index([kind])
+}
