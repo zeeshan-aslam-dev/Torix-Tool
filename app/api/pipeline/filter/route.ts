@@ -1,7 +1,9 @@
 import fs from 'fs';
 import prisma from '../../../../lib/prisma';
 import { resolveDataFile, findDataFileByPrefix, formatBytes } from '../../../../lib/dataDir';
-import { streamNppesFile, field, normalizeOrgName, buildLeadKey, HeaderIndex } from '../../../../lib/nppes';
+import { streamNppesFile, field, normalizeOrgName, normalizePersonName, buildLeadKey, HeaderIndex } from '../../../../lib/nppes';
+import { resolveScope, makeScopeMatcher, describeScope } from '../../../../lib/scope';
+import { zipCounty, usTimezone } from '../../../../lib/geo';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -45,6 +47,10 @@ function parseNppesDate(value: string): Date | null {
 type FilterRequest = {
   fileName?: string;
   states?: string;
+  cities?: string;
+  zips?: string;
+  radiusZip?: string;
+  radiusMiles?: number;
   taxonomy?: string;
   /**
    * "merge" keeps every existing lead and updates it in place — the safe default.
@@ -67,6 +73,8 @@ type Group = {
   phone: string;
   fax: string;
   aoName: string;
+  aoFirst: string;
+  aoLast: string;
   aoTitle: string;
   aoPhone: string;
   lastUpdate: Date | null;
@@ -106,6 +114,15 @@ export async function POST(req: Request) {
   if (stateList.length === 0) return jsonError('At least one target state is required', 400);
   if (taxonomyList.length === 0) return jsonError('At least one taxonomy code is required', 400);
 
+  const scope = resolveScope({
+    states: statesParam,
+    cities: body?.cities,
+    zips: body?.zips,
+    radiusZip: body?.radiusZip,
+    radiusMiles: body?.radiusMiles,
+  });
+  const inScope = makeScopeMatcher(scope);
+
   const states = new Set(stateList);
   const taxonomyCodes = new Set(taxonomyList);
 
@@ -132,14 +149,42 @@ export async function POST(req: Request) {
           message: `Reading ${fileName} (${formatBytes(totalBytes)}) from disk — no upload needed.`,
         });
 
+        send({ type: 'log', message: `Scope: ${describeScope(scope)}.` });
+        for (const warning of scope.warnings) send({ type: 'log', message: `Scope warning: ${warning}.` });
+
         const groups = new Map<string, Group>();
         const orgLocations = new Map<string, Set<string>>();
+        // Entity Type 1 (individual) rows never become a lead of their own — a
+        // facility is Entity Type 2, and a standalone individual is exactly what
+        // this scope is meant to exclude. Kept here instead, keyed on name+state,
+        // so a facility's Authorized Official can be checked against their own
+        // personal NPI record for a second phone number that reaches the same
+        // person. Scoped to the same taxonomy list as this run: an owner is
+        // overwhelmingly likely to hold an individual NPI in their own specialty,
+        // and indexing every individual NPI nationwide regardless of taxonomy
+        // would multiply this scan's memory and row count for a case that rarely
+        // occurs outside it.
+        const individuals = new Map<string, { phone: string; npi: string }>();
         let matched = 0;
+        let matchedIndividuals = 0;
         let skippedInactive = 0;
+        let skippedOutOfScope = 0;
 
         const onRow = (fields: string[], index: HeaderIndex) => {
           const state = field(fields, index, COL.state).trim().toUpperCase();
           if (!states.has(state)) return;
+
+          // City and ZIP are read before the taxonomy loop: they are two field
+          // lookups against a row that is already split, and they reject far more
+          // rows than the taxonomy scan they would otherwise run after.
+          if (!inScope({
+            state,
+            city: field(fields, index, COL.city).trim(),
+            zip: field(fields, index, COL.zip).trim(),
+          })) {
+            skippedOutOfScope++;
+            return;
+          }
 
           let matchedTaxonomy = '';
           for (const col of TAXONOMY_COLS) {
@@ -157,9 +202,29 @@ export async function POST(req: Request) {
             return;
           }
 
+          const entityType = field(fields, index, COL.entityType).trim();
+
+          // A standalone individual is never a lead. Their name and phone go into
+          // the fallback index instead, and the row stops here — it contributes
+          // to no Group and no Lead.
+          if (entityType === '1') {
+            const firstName = field(fields, index, COL.firstName).trim();
+            const lastName = field(fields, index, COL.lastName).trim();
+            const phone = field(fields, index, COL.phone).trim();
+            const npi = field(fields, index, COL.npi).trim();
+            if (firstName && lastName && phone) {
+              const key = `${normalizePersonName(firstName, lastName)}|${state}`;
+              // First one seen wins — reconciling a rare duplicate NPI for the
+              // same person is not worth the complexity, and any number found
+              // beats none.
+              if (!individuals.has(key)) individuals.set(key, { phone, npi });
+            }
+            matchedIndividuals++;
+            return;
+          }
+
           matched++;
 
-          const entityType = field(fields, index, COL.entityType).trim();
           const organization =
             field(fields, index, COL.orgName).trim() ||
             [field(fields, index, COL.lastName), field(fields, index, COL.firstName)]
@@ -186,6 +251,8 @@ export async function POST(req: Request) {
             phone: field(fields, index, COL.phone).trim(),
             fax: field(fields, index, COL.fax).trim(),
             aoName: [aoFirst, aoLast].filter(Boolean).join(' '),
+            aoFirst,
+            aoLast,
             aoTitle: field(fields, index, COL.aoTitle).trim(),
             aoPhone: field(fields, index, COL.aoPhone).trim(),
             lastUpdate: parseNppesDate(field(fields, index, COL.lastUpdate)),
@@ -195,10 +262,20 @@ export async function POST(req: Request) {
             parentLbn: field(fields, index, COL.parentLbn).trim(),
           };
 
-          // Group on the normalized name so the same company spelled three
-          // different ways lands in one location, and one location count.
+          // Grouped on the exact same key that ends up in the database —
+          // buildLeadKey itself, not a hand-rolled approximation of it. The
+          // two used to differ (this key kept the raw address and city;
+          // buildLeadKey strips punctuation and collapses whitespace on
+          // both), so two rows whose address differed only by a period or an
+          // extra space landed in separate groups here but produced the same
+          // leadKey at insert time — invisible until a run large enough to
+          // actually hit one collided, which a national import did on its
+          // 9,501st row: `createMany` failed outright on a duplicate
+          // leadKey. Using buildLeadKey here makes that collision
+          // structurally impossible — anything that would share a leadKey
+          // now shares a group first, and merges through mergeGroup instead.
           const orgKey = normalizeOrgName(organization);
-          const key = `${orgKey}|${address}|${city}|${state}|${zip}`.toUpperCase();
+          const key = buildLeadKey({ organization, address, city, state, zip });
           const existing = groups.get(key);
 
           if (!existing) {
@@ -236,8 +313,19 @@ export async function POST(req: Request) {
           type: 'log',
           message:
             `Scanned ${rowsRead.toLocaleString()} rows in ${((Date.now() - startedAt) / 1000).toFixed(0)}s — ` +
-            `${matched.toLocaleString()} matching providers across ${groups.size.toLocaleString()} locations` +
-            (skippedInactive ? ` (${skippedInactive.toLocaleString()} deactivated NPIs skipped).` : '.'),
+            `${matched.toLocaleString()} matching facilities across ${groups.size.toLocaleString()} locations` +
+            (skippedInactive || skippedOutOfScope
+              ? ` (${[
+                  skippedInactive ? `${skippedInactive.toLocaleString()} deactivated NPIs` : '',
+                  skippedOutOfScope ? `${skippedOutOfScope.toLocaleString()} outside the city/ZIP filter` : '',
+                ].filter(Boolean).join(', ')} skipped).`
+              : '.'),
+        });
+        send({
+          type: 'log',
+          message:
+            `${matchedIndividuals.toLocaleString()} standalone individual providers seen — none become leads; ` +
+            `${individuals.size.toLocaleString()} distinct names kept as a fallback phone lookup for facility owners.`,
         });
 
         if (mode === 'reset') {
@@ -261,30 +349,62 @@ export async function POST(req: Request) {
           send
         );
 
-        const rows = Array.from(groups.values()).map((g) => ({
-          leadKey: buildLeadKey(g),
-          organization: g.organization,
-          address: g.address,
-          city: g.city,
-          state: g.state,
-          zip: g.zip,
-          npi: g.npi,
-          taxonomy: g.taxonomy,
-          n_providers_at_location: g.providers,
-          n_locations_detected: orgLocations.get(normalizeOrgName(g.organization))?.size ?? 1,
-          entityType: g.entityType || null,
-          phone: g.phone || null,
-          fax: g.fax || null,
-          authorizedOfficialName: g.aoName || null,
-          authorizedOfficialTitle: g.aoTitle || null,
-          authorizedOfficialPhone: g.aoPhone || null,
-          lastUpdateDate: g.lastUpdate,
-          enumerationDate: g.enumeration,
-          isSoleProprietor: g.soleProprietor || null,
-          isOrganizationSubpart: g.subpart || null,
-          parentOrganizationLbn: g.parentLbn || null,
-          dbaNames: dbaByNpi.get(g.npi)?.join('|') || null,
-        }));
+        let alternatesFound = 0;
+
+        const rows = Array.from(groups.values()).map((g) => {
+          const county = zipCounty(g.zip);
+          const timezone = usTimezone(g.state, county);
+
+          // The facility's own Authorized Official, checked against their personal
+          // NPI record. Only worth recording when it actually adds a number the
+          // practice's own listing does not already have.
+          let alternateOfficialPhone: string | null = null;
+          let alternateOfficialNpi: string | null = null;
+          if (g.aoFirst && g.aoLast) {
+            const individual = individuals.get(`${normalizePersonName(g.aoFirst, g.aoLast)}|${g.state}`);
+            if (individual && individual.phone && individual.phone !== g.aoPhone && individual.phone !== g.phone) {
+              alternateOfficialPhone = individual.phone;
+              alternateOfficialNpi = individual.npi || null;
+              alternatesFound++;
+            }
+          }
+
+          return {
+            leadKey: buildLeadKey(g),
+            organization: g.organization,
+            address: g.address,
+            city: g.city,
+            state: g.state,
+            zip: g.zip,
+            npi: g.npi,
+            taxonomy: g.taxonomy,
+            n_providers_at_location: g.providers,
+            n_locations_detected: orgLocations.get(normalizeOrgName(g.organization))?.size ?? 1,
+            entityType: g.entityType || null,
+            phone: g.phone || null,
+            fax: g.fax || null,
+            authorizedOfficialName: g.aoName || null,
+            authorizedOfficialTitle: g.aoTitle || null,
+            authorizedOfficialPhone: g.aoPhone || null,
+            alternateOfficialPhone,
+            alternateOfficialNpi,
+            county,
+            timezone,
+            lastUpdateDate: g.lastUpdate,
+            enumerationDate: g.enumeration,
+            isSoleProprietor: g.soleProprietor || null,
+            isOrganizationSubpart: g.subpart || null,
+            parentOrganizationLbn: g.parentLbn || null,
+            dbaNames: dbaByNpi.get(g.npi)?.join('|') || null,
+          };
+        });
+
+        if (alternatesFound > 0) {
+          send({
+            type: 'log',
+            message: `${alternatesFound.toLocaleString()} facility owners matched their own individual NPI record with a different phone number.`,
+          });
+        }
 
         // Split on what the database already knows, so new practices are bulk
         // inserted and known ones are updated in place. Scores, websites, contacts
@@ -335,6 +455,10 @@ export async function POST(req: Request) {
                   authorizedOfficialName: row.authorizedOfficialName,
                   authorizedOfficialTitle: row.authorizedOfficialTitle,
                   authorizedOfficialPhone: row.authorizedOfficialPhone,
+                  alternateOfficialPhone: row.alternateOfficialPhone,
+                  alternateOfficialNpi: row.alternateOfficialNpi,
+                  county: row.county,
+                  timezone: row.timezone,
                   lastUpdateDate: row.lastUpdateDate,
                   enumerationDate: row.enumerationDate,
                   isSoleProprietor: row.isSoleProprietor,
@@ -393,6 +517,8 @@ function mergeGroup(target: Group, incoming: Group) {
   if (incomingIsOrg && !targetIsOrg) {
     target.entityType = incoming.entityType;
     target.aoName = incoming.aoName;
+    target.aoFirst = incoming.aoFirst;
+    target.aoLast = incoming.aoLast;
     target.aoTitle = incoming.aoTitle;
     target.aoPhone = incoming.aoPhone;
     target.subpart = incoming.subpart;
@@ -403,6 +529,8 @@ function mergeGroup(target: Group, incoming: Group) {
   target.phone = target.phone || incoming.phone;
   target.fax = target.fax || incoming.fax;
   target.aoName = target.aoName || incoming.aoName;
+  target.aoFirst = target.aoFirst || incoming.aoFirst;
+  target.aoLast = target.aoLast || incoming.aoLast;
   target.aoTitle = target.aoTitle || incoming.aoTitle;
   target.aoPhone = target.aoPhone || incoming.aoPhone;
   target.soleProprietor = target.soleProprietor || incoming.soleProprietor;

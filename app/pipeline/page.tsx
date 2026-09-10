@@ -5,6 +5,7 @@ import styles from "./page.module.css";
 import { FolderOpen, Play, CheckCircle2, RefreshCw, FileText, Flame, Globe, Users, Send, Download } from "lucide-react";
 import classNames from "classnames";
 import StateSelect from "../components/StateSelect";
+import AreaFilter, { Area, EMPTY_AREA, areaToRequest } from "../components/AreaFilter";
 
 const num = (value: number | undefined) => (value ?? 0).toLocaleString();
 const errorMessage = (error: unknown) => (error instanceof Error ? error.message : String(error));
@@ -43,6 +44,7 @@ type StreamEvent = {
   counts?: ScoreCounts;
   found?: number;
   emails?: number;
+  sendable?: number;
   sent?: number;
   failed?: number;
   mode?: string;
@@ -61,12 +63,14 @@ export default function PipelinePage() {
   const [states, setStates] = useState("UT");
   const [taxonomy, setTaxonomy] = useState("111N00000X,152W00000X,207Q00000X");
   const [importMode, setImportMode] = useState<"merge" | "reset">("merge");
+  const [area, setArea] = useState<Area>(EMPTY_AREA);
 
   const [verifyTags, setVerifyTags] = useState<string[]>(["HOT"]);
   const [verifyLimit, setVerifyLimit] = useState(100);
   const [minConfidence, setMinConfidence] = useState(40);
   const [concurrency, setConcurrency] = useState(5);
   const [useSerpApi, setUseSerpApi] = useState(false);
+  const [useGbp, setUseGbp] = useState(false);
   const [recheck, setRecheck] = useState(false);
 
   const [contactTags, setContactTags] = useState<string[]>(["HOT"]);
@@ -74,6 +78,8 @@ export default function PipelinePage() {
   const [minEmailConfidence, setMinEmailConfidence] = useState(45);
   const [scrapeWebsites, setScrapeWebsites] = useState(true);
   const [contactRecheck, setContactRecheck] = useState(false);
+  const [verifyEmails, setVerifyEmails] = useState(true);
+  const [allowRiskyEmails, setAllowRiskyEmails] = useState(false);
 
   const [sendTags, setSendTags] = useState<string[]>(["HOT"]);
   const [sendLimit, setSendLimit] = useState(500);
@@ -83,6 +89,7 @@ export default function PipelinePage() {
 
   const [hotThreshold, setHotThreshold] = useState(55);
   const [verifyThreshold, setVerifyThreshold] = useState(30);
+  const [maxLocations, setMaxLocations] = useState(21);
   const [counts, setCounts] = useState<ScoreCounts | null>(null);
 
   const addLog = (msg: string) =>
@@ -177,7 +184,7 @@ export default function PipelinePage() {
 
     const ok = await runStream(
       "/api/pipeline/filter",
-      { fileName: selectedFile, states, taxonomy, mode: importMode },
+      { fileName: selectedFile, states, taxonomy, mode: importMode, ...areaToRequest(area) },
       event => {
         if (event.type === "log" || event.type === "done") {
           addLog(event.message ?? "");
@@ -201,12 +208,12 @@ export default function PipelinePage() {
   };
 
   const runScore = async () => {
-    addLog(`Scoring leads with thresholds HOT >= ${hotThreshold}, VERIFY >= ${verifyThreshold}...`);
+    addLog(`Scoring leads with thresholds HOT >= ${hotThreshold}, VERIFY >= ${verifyThreshold}, max locations ${maxLocations}...`);
     setCounts(null);
 
     const ok = await runStream(
       "/api/pipeline/score",
-      { hotThreshold, verifyThreshold, states },
+      { hotThreshold, verifyThreshold, maxLocations, states, ...areaToRequest(area) },
       event => {
         if (event.type === "log" || event.type === "done") {
           addLog(event.message ?? "");
@@ -235,7 +242,10 @@ export default function PipelinePage() {
 
     await runStream(
       "/api/pipeline/verify",
-      { tags: verifyTags, states, limit: verifyLimit, minConfidence, concurrency, useSerpApi, recheck },
+      {
+        tags: verifyTags, states, limit: verifyLimit, minConfidence, concurrency,
+        useSerpApi, useGbp, recheck, ...areaToRequest(area),
+      },
       event => {
         if (event.type === "log" || event.type === "done") {
           addLog(event.message ?? "");
@@ -262,6 +272,7 @@ export default function PipelinePage() {
       {
         tags: contactTags, states, limit: contactLimit,
         minEmailConfidence, scrapeWebsites, recheck: contactRecheck, concurrency,
+        verifyEmails, allowRiskyEmails, ...areaToRequest(area),
       },
       event => {
         if (event.type === "log" || event.type === "done") {
@@ -269,7 +280,7 @@ export default function PipelinePage() {
         } else if (event.type === "progress") {
           addLog(
             `Processed ${num(event.processed)} / ${num(event.total)} (${(event.percent ?? 0).toFixed(0)}%) — ` +
-              `${num(event.emails)} emails found`
+              `${num(event.emails)} emails found, ${num(event.sendable)} sendable`
           );
         }
       }
@@ -287,7 +298,10 @@ export default function PipelinePage() {
 
     await runStream(
       "/api/pipeline/send",
-      { tags: sendTags, states, limit: sendLimit, mode: sendMode, resend, concurrency },
+      {
+        tags: sendTags, states, limit: sendLimit, mode: sendMode, resend, concurrency,
+        allowRiskyEmails, ...areaToRequest(area),
+      },
       event => {
         if (event.type === "log" || event.type === "done") {
           addLog(event.message ?? "");
@@ -385,6 +399,15 @@ export default function PipelinePage() {
                   onChange={setStates}
                   disabled={isProcessing}
                   emptyLabel="Pick at least one state"
+                />
+              </div>
+              <div className={styles.formGroup}>
+                <label className={styles.label}>Narrow the area (optional)</label>
+                <AreaFilter
+                  states={states}
+                  value={area}
+                  onChange={setArea}
+                  disabled={isProcessing}
                 />
               </div>
               <div className={styles.formGroup}>
@@ -515,8 +538,10 @@ export default function PipelinePage() {
               <h2>Step 2: Filter &amp; Score</h2>
               <p style={{ color: 'var(--text-secondary)', margin: 0 }}>
                 Scores every imported lead on business type, decision maker, size, data freshness
-                and ownership, then tags it HOT, VERIFY or EXCLUDE. Runs on data already in the
-                database — no API keys, no cost, safe to re-run.
+                and ownership, then tags it HOT, VERIFY or EXCLUDE. Individual providers (Entity
+                Type 1) and anything the blocklist or a Step 3 web search flagged as part of
+                another organisation are excluded outright, before any points are counted. Runs
+                on data already in the database — no API keys, no cost, safe to re-run.
               </p>
 
               <div className={styles.thresholdRow}>
@@ -541,6 +566,18 @@ export default function PipelinePage() {
                     max={100}
                     value={verifyThreshold}
                     onChange={e => setVerifyThreshold(Number(e.target.value))}
+                    disabled={isProcessing}
+                  />
+                </div>
+                <div className={styles.formGroup}>
+                  <label className={styles.label}>Max locations (chain cutoff)</label>
+                  <input
+                    type="number"
+                    className="input-base"
+                    min={2}
+                    max={9999}
+                    value={maxLocations}
+                    onChange={e => setMaxLocations(Number(e.target.value))}
                     disabled={isProcessing}
                   />
                 </div>
@@ -657,13 +694,35 @@ export default function PipelinePage() {
                 Re-check leads that already have a result
               </label>
 
+              <div className={styles.formGroup}>
+                <label className={styles.label}>Area</label>
+                <AreaFilter
+                  states={states}
+                  value={area}
+                  onChange={setArea}
+                  disabled={isProcessing}
+                />
+              </div>
+
               <label className={styles.checkboxRow}>
                 <input
                   type="checkbox" checked={useSerpApi}
                   onChange={e => setUseSerpApi(e.target.checked)}
                   disabled={isProcessing}
                 />
-                Use paid search for whatever the free sources miss (needs <code>SERPAPI_KEY</code> in <code>.env</code>)
+                Use paid search for whatever the free sources miss (needs <code>SERPER_KEY</code> or{' '}
+                <code>SERPAPI_KEY</code> in <code>.env</code>)
+              </label>
+
+              <label className={styles.checkboxRow}>
+                <input
+                  type="checkbox" checked={useGbp}
+                  onChange={e => setUseGbp(e.target.checked)}
+                  disabled={isProcessing || !useSerpApi}
+                />
+                Also look up the Google Business Profile — adds rating, category and a
+                &ldquo;permanently closed&rdquo; flag. <strong>Costs one extra query per
+                unresolved lead.</strong>
               </label>
 
               {logPanel}
@@ -686,7 +745,8 @@ export default function PipelinePage() {
                 Builds a contact per lead from free sources. The NPPES authorized
                 official supplies a name, title and phone for every organization.
                 Email is not in NPPES at all, so it is scraped from the practice&apos;s
-                own site for the leads where Step 3 found one.
+                own site for the leads where Step 3 found one, then verified before
+                it is allowed anywhere near Step 5.
               </p>
 
               <div className={styles.formGroup}>
@@ -757,6 +817,25 @@ export default function PipelinePage() {
                   disabled={isProcessing}
                 />
                 Re-check leads that already have a contact
+              </label>
+
+              <label className={styles.checkboxRow}>
+                <input
+                  type="checkbox" checked={verifyEmails}
+                  onChange={e => setVerifyEmails(e.target.checked)}
+                  disabled={isProcessing}
+                />
+                Verify each address before accepting it — syntax and MX are free;{' '}
+                <code>MILLIONVERIFIER_KEY</code> adds the mailbox-level check
+              </label>
+
+              <label className={styles.checkboxRow}>
+                <input
+                  type="checkbox" checked={allowRiskyEmails}
+                  onChange={e => setAllowRiskyEmails(e.target.checked)}
+                  disabled={isProcessing || !verifyEmails}
+                />
+                Allow catch-all and unknown addresses through (higher volume, higher bounce risk)
               </label>
 
               {logPanel}

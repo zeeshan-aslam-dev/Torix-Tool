@@ -78,15 +78,39 @@ export function extractEmails(
 ): EmailCandidate[] {
   const found = new Map<string, EmailCandidate>();
 
+  /**
+   * Decodes URL-escaping and re-extracts the email shape from the result.
+   *
+   * A source-authored "mailto: office@..." (space after the colon) commonly
+   * reaches us HTML-encoded as "mailto:%20office@...". `%` is also a legal
+   * RFC 5322 local-part character, so a plain scan of the page text accepts
+   * "%20office@theeyepros.com" as a valid address just as readily as the
+   * mailto capture does — both sources need the same decode-and-reconfirm
+   * pass, or the two disagree on the same address and both versions survive.
+   */
+  const normalizeCandidate = (text: string): string | null => {
+    let value = text;
+    try {
+      value = decodeURIComponent(value);
+    } catch {
+      // A malformed % escape should not break extraction — fall back to the raw text.
+    }
+    const match = value.match(EMAIL_RE);
+    return match ? match[0].toLowerCase() : null;
+  };
+
   // mailto links are the strongest signal — someone deliberately published them
   const mailtos = new Set<string>();
   Array.from(html.matchAll(/mailto:([^"'?>\s]+)/gi)).forEach((m) => {
-    mailtos.add(m[1].toLowerCase().trim());
+    const email = normalizeCandidate(m[1]);
+    if (email) mailtos.add(email);
   });
 
   const raw = new Set<string>([
     ...Array.from(mailtos),
-    ...Array.from(html.matchAll(EMAIL_RE)).map((m) => m[0].toLowerCase()),
+    ...Array.from(html.matchAll(EMAIL_RE))
+      .map((m) => normalizeCandidate(m[0]))
+      .filter((e): e is string => e !== null),
   ]);
 
   const nameParts = (decisionMakerName ?? '')

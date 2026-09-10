@@ -20,12 +20,25 @@ export type SendableLead = {
   phone: string | null;
   title: string | null;
   website: string | null;
+  /** The business's own LinkedIn page, when Step 3's search happened to surface one. */
+  linkedin: string | null;
   city: string;
   state: string;
+  county: string | null;
+  timezone: string | null;
   score: number;
+  /** A second NPI phone for the same Authorized Official — see Step 1. */
+  alternatePhone: string | null;
+  /** A name the practice's own site gave for its owner, when it differs from NPPES. */
+  webOwnerName: string | null;
 };
 
-/** Columns Instantly maps on import. Keep the header text stable. */
+/**
+ * Columns Instantly maps on import. Keep the header text stable, and add new
+ * columns at the end — Instantly remembers a mapping by position from the
+ * last import, and inserting one in the middle would silently shift every
+ * column after it into the wrong field on a re-import.
+ */
 const CSV_COLUMNS: { header: string; get: (lead: SendableLead) => string }[] = [
   { header: 'Email', get: (l) => l.email },
   { header: 'First Name', get: (l) => l.firstName },
@@ -37,6 +50,14 @@ const CSV_COLUMNS: { header: string; get: (lead: SendableLead) => string }[] = [
   { header: 'City', get: (l) => l.city },
   { header: 'State', get: (l) => l.state },
   { header: 'Lead Score', get: (l) => String(l.score) },
+  { header: 'LinkedIn', get: (l) => l.linkedin ?? '' },
+  { header: 'Time Zone', get: (l) => l.timezone ?? '' },
+  { header: 'County', get: (l) => l.county ?? '' },
+  { header: 'Alternate Phone', get: (l) => l.alternatePhone ?? '' },
+  // Never the value Torix itself relies on — that stays authorizedOfficialName /
+  // the "Title" column above. This is only here so whoever works the list can
+  // see the site disagreed with NPPES without opening the CRM to find out.
+  { header: 'Site-Stated Owner (if different from NPPES)', get: (l) => l.webOwnerName ?? '' },
 ];
 
 function csvCell(value: string): string {
@@ -115,6 +136,11 @@ export async function pushToInstantly(
           city: lead.city,
           state: lead.state,
           lead_score: lead.score,
+          linkedin: lead.linkedin ?? '',
+          timezone: lead.timezone ?? '',
+          county: lead.county ?? '',
+          alternate_phone: lead.alternatePhone ?? '',
+          site_stated_owner: lead.webOwnerName ?? '',
         },
       }),
     });

@@ -39,15 +39,69 @@ model Lead {
   isOrganizationSubpart   String?
   parentOrganizationLbn   String?
 
+  /// A separate individual (Entity Type 1) NPI record for this same person,
+  /// found by name+state during Step 1. Kept only as a fallback contact number
+  /// — a personal NPI phone that differs from the practice's own listed number
+  /// is a second way to reach the same decision maker, not a lead in itself.
+  alternateOfficialPhone  String?
+  alternateOfficialNpi    String?
+
+  /// Time Zone > State > City > County — the grouping this was built for.
+  /// County comes from a ZIP crosswalk (NPPES has none); time zone is
+  /// state-level with overrides for the well-documented split counties.
+  /// Neither is a live lookup — set once at Step 1 from the ZIP already on
+  /// the row, so it costs nothing to reuse on every future query.
+  county                  String?
+  timezone                String?
+
+  /// A name pulled from the practice's own website/contact page rather than
+  /// asserted by NPPES — set only when Step 4 finds explicit ownership language
+  /// ("Owner: ...", "founded by ...") near a name. Compared against
+  /// authorizedOfficialName in the log, not auto-merged into it: NPPES stays
+  /// the field of record unless a human decides the site is right and it is
+  /// wrong.
+  webOwnerName            String?
+  webOwnerNameSource      String?       // which page it was found on
+
   tag                     String?       // HOT, VERIFY, EXCLUDE
   reason                  String?
   score                   Int           @default(0)
   scoredAt                DateTime?
   website_found           String?
-  websiteSource           String?       // endpoint, guess, serpapi
+  websiteSource           String?       // endpoint, guess, search, gbp
   websiteConfidence       Int?          // 0-100, how well the page matched the lead
   websiteCheckedAt        DateTime?
+  // The business's own LinkedIn page — read out of Step 3's search results at no
+  // extra cost, since linkedin.com is already fetched and then discarded as a
+  // directory domain. Set only when found, same as possible_acquisition below.
+  linkedinUrl             String?
+
+  // Google Business Profile — the only source that reports whether a practice
+  // has stopped trading, which NPPES never does.
+  gbpPlaceId              String?
+  gbpName                 String?
+  gbpCategory             String?
+  gbpRating               Float?
+  gbpReviews              Int?
+  gbpPhone                String?
+  gbpWebsite              String?
+  gbpStatus               String?       // OPERATIONAL, CLOSED_TEMPORARILY, CLOSED_PERMANENTLY
+  gbpMatchConfidence      Int?          // 0-100, how sure we are it is the same business
+  gbpCheckedAt            DateTime?
+  /// Step 2's own read of the NPPES subpart/parent fields — recomputed, and so
+  /// safe to overwrite, on every score run. Informational only; it never gates
+  /// anything on its own.
   possible_acquisition    Boolean       @default(false)
+  /// Set once by Step 3 when its own site or a search result stated the
+  /// practice is "part of"/"acquired by" another organisation, and never reset
+  /// by anything else — a page that later stops saying so does not undo the
+  /// finding. Step 2 reads this back as a hard EXCLUDE gate. Keeping it in a
+  /// field of its own, separate from possible_acquisition above, matters: that
+  /// field is rewritten unconditionally on every score run, and a gate fed by
+  /// a value the same step keeps overwriting would occasionally un-exclude a
+  /// lead Step 3 had correctly flagged, for no reason a person watching would
+  /// be able to see.
+  webAcquisitionFlag      Boolean       @default(false)
   search_snippet          String?
   dbaNames                String?       // trade names from othername_pfile
   
@@ -76,6 +130,8 @@ model Contact {
   decisionMakerPhone    String?
   emailSource           String?   // nppes, website
   emailConfidence       Int?      // 0-100
+  emailVerifyStatus     String?   // ok, mx_ok, catch_all, unknown, invalid, disposable
+  emailVerifiedAt       DateTime?
   contactCheckedAt      DateTime?
 
   createdAt             DateTime @default(now())

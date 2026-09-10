@@ -139,6 +139,54 @@ export function normalizeOrgName(name: string): string {
 }
 
 /**
+ * A person's name, normalised for matching a practice's Authorized Official
+ * against their own individual NPI record — the same person can be typed
+ * "Jenny Mckay" in one place and "MCKAY, JENNY M" in another. Middle names and
+ * suffixes are dropped rather than compared, since NPPES is inconsistent about
+ * whether they are even present on either side of the match.
+ */
+export function normalizePersonName(first: string, last: string): string {
+  const clean = (s: string) =>
+    s
+      .toUpperCase()
+      .replace(/[.']/g, '')
+      .replace(/[^A-Z ]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      // A first name field sometimes carries a middle name too ("JENNY M");
+      // only the first token is the one worth matching on.
+      .split(' ')[0] ?? '';
+
+  return `${clean(first)}|${clean(last)}`;
+}
+
+/**
+ * Whether a free-text name found on a website plausibly refers to the same
+ * person as NPPES's combined "First Last" name — used to decide whether a
+ * name Step 4 found on a practice's own site is worth flagging as a possible
+ * disagreement with the Authorized Official, or is just that name with a
+ * title or credential attached ("Dr. Jane Kimball, OD" for "Jane Kimball").
+ *
+ * Every real word in the NPPES name has to appear somewhere in the website
+ * name; the website name is allowed to carry extra words the comparison
+ * simply ignores.
+ */
+export function nameLikelyMatches(nppesName: string, webName: string): boolean {
+  const words = (s: string) =>
+    s
+      .toUpperCase()
+      .replace(/[^A-Z ]/g, ' ')
+      .split(/\s+/)
+      .filter((w) => w.length > 1);
+
+  const nppesWords = words(nppesName);
+  if (nppesWords.length === 0) return false;
+
+  const webWords = new Set(words(webName));
+  return nppesWords.every((w) => webWords.has(w));
+}
+
+/**
  * The stable identity of one practice location.
  *
  * Built from the normalised organisation name plus the address, so the same

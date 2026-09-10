@@ -91,7 +91,11 @@
   margin-top: 6px;
   border-radius: var(--radius-md);
   border: 1px solid var(--border-strong);
-  background: var(--bg-surface, #12161f);
+  /* A solid colour, not --bg-surface: that token is a near-transparent white
+     tint meant for a card sitting flat on the page background, and on a
+     floating panel positioned over other fields it let them show straight
+     through instead of being occluded. */
+  background: #12161f;
   box-shadow: 0 18px 40px rgba(0, 0, 0, 0.55);
   overflow: hidden;
 }

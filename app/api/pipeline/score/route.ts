@@ -1,6 +1,7 @@
 import prisma from '../../../../lib/prisma';
-import { scoreLead, DEFAULT_THRESHOLDS, Thresholds } from '../../../../lib/scoring';
+import { scoreLead, DEFAULT_THRESHOLDS, DEFAULT_SIZE_POLICY, Thresholds, SizePolicy } from '../../../../lib/scoring';
 import { matchBlocklist, blocklistSize } from '../../../../lib/blocklist';
+import { resolveScope, scopeWhere, describeScope } from '../../../../lib/scope';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -9,7 +10,19 @@ export const maxDuration = 900;
 type ScoreRequest = {
   hotThreshold?: number;
   verifyThreshold?: number;
+  /**
+   * At or above this many locations a lead is treated as a chain and
+   * penalised outright, rather than getting the multi-location bonus.
+   * Exposed here rather than left as a constant in lib/scoring.ts so the
+   * ideal-customer size can be dialled in from the UI, indefinitely, without
+   * a code change.
+   */
+  maxLocations?: number;
   states?: string;
+  cities?: string;
+  zips?: string;
+  radiusZip?: string;
+  radiusMiles?: number;
 };
 
 /**
@@ -36,12 +49,15 @@ export async function POST(req: Request) {
     return jsonError('HOT threshold must be higher than the VERIFY threshold', 400);
   }
 
-  const stateList: string[] = (body?.states ?? '')
-    .split(',')
-    .map((s: string) => s.trim().toUpperCase())
-    .filter(Boolean);
+  const sizePolicy: SizePolicy = {
+    ...DEFAULT_SIZE_POLICY,
+    ...(Number.isFinite(body?.maxLocations) && Number(body.maxLocations) > DEFAULT_SIZE_POLICY.idealMin
+      ? { chainCutoff: Number(body.maxLocations) }
+      : {}),
+  };
 
-  const where = stateList.length ? { state: { in: stateList } } : {};
+  const scope = resolveScope(body);
+  const where = scopeWhere(scope);
   const encoder = new TextEncoder();
 
   const stream = new ReadableStream({
@@ -62,6 +78,8 @@ export async function POST(req: Request) {
           return;
         }
 
+        send({ type: 'log', message: `Scope: ${describeScope(scope)}.` });
+        for (const warning of scope.warnings) send({ type: 'log', message: `Scope warning: ${warning}.` });
         send({
           type: 'log',
           message:
@@ -97,6 +115,8 @@ export async function POST(req: Request) {
               isSoleProprietor: true,
               isOrganizationSubpart: true,
               parentOrganizationLbn: true,
+              gbpStatus: true,
+              webAcquisitionFlag: true,
             },
           });
 
@@ -104,7 +124,13 @@ export async function POST(req: Request) {
           cursor = page[page.length - 1].id;
 
           const updates = page.map((lead) => {
-            const result = scoreLead(lead, thresholds, now, matchBlocklist);
+            const result = scoreLead(
+              { ...lead, possibleAcquisition: lead.webAcquisitionFlag },
+              thresholds,
+              now,
+              matchBlocklist,
+              sizePolicy
+            );
             if (result.reason.startsWith('blocklisted:')) blockedCount++;
             counts[result.tag]++;
             return prisma.lead.update({

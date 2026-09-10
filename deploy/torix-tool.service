@@ -1,0 +1,23 @@
+[Unit]
+Description=Torix Lead Engine (Next.js)
+After=network.target
+
+[Service]
+Type=simple
+User=torix
+WorkingDirectory=/opt/torix-tool
+# Loads DATABASE_URL, SERPAPI_KEY, etc. — the same .env the app reads locally.
+EnvironmentFile=/opt/torix-tool/.env
+Environment=NODE_ENV=production
+Environment=PORT=3000
+ExecStart=/usr/bin/npm start
+Restart=always
+RestartSec=5
+
+# Streaming a multi-hour Step 3 run must not be cut off by a shutdown signal
+# arriving mid-request — give it real time to finish before systemd escalates
+# to SIGKILL.
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

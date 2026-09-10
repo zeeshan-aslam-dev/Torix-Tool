@@ -22,6 +22,16 @@ export type ScoreInput = {
   isSoleProprietor?: string | null;
   isOrganizationSubpart?: string | null;
   parentOrganizationLbn?: string | null;
+  /** Set by Step 3 from the Google Business Profile listing, when one matched. */
+  gbpStatus?: string | null;
+  /**
+   * Set by Step 3 when its own site or a search result stated, in so many
+   * words, that the practice is "part of" / "acquired by" another
+   * organisation. A hard exclude at the same tier as the blocklist below —
+   * the objection is who actually decides, not how the rest of the record
+   * scores.
+   */
+  possibleAcquisition?: boolean | null;
 };
 
 export type ScoreResult = {
@@ -35,6 +45,24 @@ export type Thresholds = {
   hot: number;
   verify: number;
 };
+
+/**
+ * The location-count boundaries that separate "needs a web presence" from
+ * "already has in-house marketing." Kept as data the caller can override
+ * rather than numbers buried in the function body, so the ideal-customer size
+ * can be dialled in over time without a code change — Step 2 exposes
+ * `maxLocations` in the UI as exactly this cutoff.
+ */
+export type SizePolicy = {
+  /** At or above this many locations, the multi-location bonus starts. */
+  idealMin: number;
+  /** At or above this many locations, the bonus shrinks — likely has internal resources. */
+  midMin: number;
+  /** At or above this many locations, treated as a chain and penalised outright. */
+  chainCutoff: number;
+};
+
+export const DEFAULT_SIZE_POLICY: SizePolicy = { idealMin: 2, midMin: 11, chainCutoff: 21 };
 
 export const DEFAULT_THRESHOLDS: Thresholds = { hot: 55, verify: 30 };
 
@@ -59,8 +87,23 @@ export function scoreLead(
   thresholds: Thresholds = DEFAULT_THRESHOLDS,
   now: Date = new Date(),
   /** Injected so the scorer stays pure and testable without touching the disk. */
-  blocklistMatch: (organization: string) => { entry: string } | null = () => null
+  blocklistMatch: (organization: string) => { entry: string } | null = () => null,
+  sizePolicy: SizePolicy = DEFAULT_SIZE_POLICY
 ): ScoreResult {
+  // Entity Type 1 is an individual provider, not a facility — never a lead,
+  // regardless of anything else on the record. Step 1 already keeps a fresh
+  // import from creating one; this is what makes the same rule take effect on
+  // a lead that was imported before that existed, on nothing more than a
+  // re-run of this step.
+  if (lead.entityType === '1') {
+    return {
+      score: 0,
+      tag: 'EXCLUDE',
+      reason: 'Entity Type 1 — an individual provider, not a facility. Kept only as a fallback contact, never a lead.',
+      possibleAcquisition: false,
+    };
+  }
+
   // A named health system is disqualified outright — no points can rescue it,
   // because the objection is who decides, not how big the practice looks.
   const blocked = lead.organization ? blocklistMatch(lead.organization) : null;
@@ -70,6 +113,31 @@ export function scoreLead(
       tag: 'EXCLUDE',
       reason: `blocklisted: part of ${blocked.entry}`,
       possibleAcquisition: true,
+    };
+  }
+
+  // Step 3 read it in so many words on the practice's own site or in a search
+  // result — the same hard exclude as the blocklist above, just discovered
+  // online instead of from a static list. Only takes effect once Step 3 has
+  // actually run and this field is set; re-run this step afterward to apply it.
+  if (lead.possibleAcquisition) {
+    return {
+      score: 0,
+      tag: 'EXCLUDE',
+      reason: "a search result or the practice's own site described it as part of another organisation",
+      possibleAcquisition: true,
+    };
+  }
+
+  // Google says the practice has shut. Nothing else about the record matters, and
+  // NPPES will not say so itself — 41% of records have not been touched in ten
+  // years, so a closed clinic looks identical to an open one in the source file.
+  if ((lead.gbpStatus || '').toUpperCase() === 'CLOSED_PERMANENTLY') {
+    return {
+      score: 0,
+      tag: 'EXCLUDE',
+      reason: 'Google Business Profile reports this practice permanently closed',
+      possibleAcquisition: false,
     };
   }
 
@@ -107,12 +175,12 @@ export function scoreLead(
     add(5, 'named contact on file');
   }
 
-  // --- Size ----------------------------------------------------------------
-  if (locations > 20) {
+  // --- Size ------------------------------------------------------------------
+  if (locations >= sizePolicy.chainCutoff) {
     add(-30, `${locations} locations, large chain with in-house marketing`);
-  } else if (locations >= 11) {
+  } else if (locations >= sizePolicy.midMin) {
     add(5, `${locations} locations, likely has internal resources`);
-  } else if (locations >= 2) {
+  } else if (locations >= sizePolicy.idealMin) {
     add(20, `${locations} locations, needs multi-location web presence`);
   }
 

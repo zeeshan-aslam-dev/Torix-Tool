@@ -8,11 +8,17 @@
  *                  only covers ~9% of leads and is mostly EHR vendor noise.
  *   2. guess     — <practicename>.com and friends, confirmed by fetching the page.
  *                  Free apart from the HTTP request; needs parked-domain checks.
- *   3. serpapi   — a real search. Costs money and needs SERPAPI_KEY.
+ *   3. search    — a real search. Costs money and needs SERPER_KEY or SERPAPI_KEY.
+ *   4. gbp       — the Google Business Profile listing. Same cost as a search,
+ *                  and the only source that says whether the practice is still
+ *                  trading.
  *
  * Whatever is found is only accepted once the page itself confirms the lead:
  * the practice phone, city, street number or name has to appear on it.
  */
+
+import { PlaceHit, phoneDigits } from './search';
+import { normalizeOrgName } from './nppes';
 
 export type VerifyTarget = {
   id: number;
@@ -28,7 +34,7 @@ export type VerifyTarget = {
 
 export type VerifyResult = {
   website: string | null;
-  source: 'endpoint' | 'guess' | 'serpapi' | null;
+  source: 'endpoint' | 'guess' | 'search' | 'gbp' | null;
   confidence: number;
   snippet: string;
   /** Set when the page or a search snippet says the practice joined a network. */
@@ -413,4 +419,236 @@ export async function mapWithConcurrency<T, R>(
 
   await Promise.all(runners);
   return results;
+}
+
+// ---------------------------------------------------------------------------
+// Google Business Profile matching
+// ---------------------------------------------------------------------------
+
+export type PlaceMatch = {
+  place: PlaceHit;
+  confidence: number;
+  evidence: string[];
+};
+
+/**
+ * How confident we are that a Maps listing is this lead's practice.
+ *
+ * Phone dominates deliberately. A practice name like "FAMILY MEDICINE" matches
+ * dozens of listings in one city, but a ten-digit number is effectively unique,
+ * and NPPES gives us one for every lead. Name agreement alone is treated as weak
+ * evidence rather than proof.
+ */
+export function scorePlaceMatch(target: VerifyTarget, place: PlaceHit): PlaceMatch {
+  const evidence: string[] = [];
+  let confidence = 0;
+
+  const leadPhone = phoneDigits(target.phone);
+  const placePhone = phoneDigits(place.phone);
+  if (leadPhone && placePhone && leadPhone === placePhone) {
+    confidence += 60;
+    evidence.push('phone matches');
+  }
+
+  const haystack = `${place.name} ${place.address}`.toUpperCase();
+
+  const leadName = normalizeOrgName(target.organization);
+  if (leadName && haystack.includes(leadName)) {
+    confidence += 25;
+    evidence.push('name matches');
+  } else if (leadName) {
+    // Partial credit when the distinctive words line up but the legal form or
+    // word order does not — "MCKAY FAMILY PRACTICE" against "McKay Family Med".
+    const words = leadName.split(' ').filter((w: string) => w.length > 3);
+    const hits = words.filter((w: string) => haystack.includes(w)).length;
+    if (words.length && hits / words.length >= 0.6) {
+      confidence += 15;
+      evidence.push(`${hits}/${words.length} name words match`);
+    }
+  }
+
+  if (target.city && haystack.includes(target.city.toUpperCase())) {
+    confidence += 10;
+    evidence.push('city matches');
+  }
+
+  const streetNumber = (target.address ?? '').trim().split(/\s+/)[0];
+  if (streetNumber && /^\d+$/.test(streetNumber) && place.address.includes(streetNumber)) {
+    confidence += 10;
+    evidence.push('street number matches');
+  }
+
+  if (target.zip && place.address.includes(target.zip.slice(0, 5))) {
+    confidence += 5;
+    evidence.push('zip matches');
+  }
+
+  return { place, confidence: Math.min(100, confidence), evidence };
+}
+
+/** The best-matching listing at or above `minConfidence`, or null. */
+export function pickPlace(
+  target: VerifyTarget,
+  places: PlaceHit[],
+  minConfidence = 50
+): PlaceMatch | null {
+  let best: PlaceMatch | null = null;
+  for (const place of places) {
+    const scored = scorePlaceMatch(target, place);
+    if (!best || scored.confidence > best.confidence) best = scored;
+  }
+  return best && best.confidence >= minConfidence ? best : null;
+}
+
+/** True when Google says the practice has stopped trading. */
+export function placeIsClosed(status: string): boolean {
+  return status === 'CLOSED_PERMANENTLY';
+}
+
+// ---------------------------------------------------------------------------
+// Owner-name discovery — cross-checking NPPES's Authorized Official
+// ---------------------------------------------------------------------------
+
+/**
+ * Phrases that introduce whoever owns or founded the practice. Deliberately
+ * narrow and label-shaped ("Owner:", "Founded by") rather than anything that
+ * could read as praise for an employee — a page saying "our owner is amazing"
+ * is not the sentence this needs to catch, and loosening the phrase list is
+ * exactly how the acquisition detector ended up with 15 false positives out
+ * of 15 on its first pass.
+ */
+const OWNER_PHRASES = [
+  'practice owner:', 'clinic owner:', 'owner:', 'owned by', 'is owned by',
+  'founder:', 'founded by', 'proprietor:',
+  // Both punctuated and bare-heading forms — a real page ("Meet The Owner"
+  // as an <h2>, the name starting the very next block) collapses to this
+  // once tags are stripped, with no comma anywhere near it.
+  'meet the owner,', 'meet the owner', 'meet our owner,', 'meet our owner',
+];
+
+const CREDENTIAL_SUFFIXES = new Set([
+  'MD', 'DO', 'DDS', 'DMD', 'DVM', 'DC', 'OD', 'NP', 'PA', 'DPT', 'RN', 'PHD', 'MBA',
+]);
+
+const NAME_TITLES = /^(DR|MR|MRS|MS)\.?$/i;
+
+/**
+ * Decides whether what follows an owner phrase is a person's name, and
+ * returns it with any leading title or trailing credential kept but not
+ * counted toward the two-word minimum — "Dr. Jane Kimball, OD" needs "Jane"
+ * and "Kimball" to both be there, not just "Dr." and a certification.
+ */
+function looksLikePersonName(after: string): string | null {
+  const words = after.trim().split(/\s+/).slice(0, 6);
+  const taken: string[] = [];
+  let realNameWords = 0;
+
+  for (const raw of words) {
+    const word = raw.replace(/^[^A-Za-z.'-]+|[^A-Za-z.'-]+$/g, '');
+    if (!word) break;
+
+    const bare = word.replace(/\.$/, '').toUpperCase();
+    if (CREDENTIAL_SUFFIXES.has(bare)) {
+      taken.push(word);
+      continue;
+    }
+    if (NAME_TITLES.test(word)) {
+      taken.push(word);
+      continue;
+    }
+    // An all-caps word that is not a recognised credential — "PLLC", or a
+    // credential this list does not happen to carry — reads as a stop, not
+    // as a name. Checked before the general pattern below because that
+    // pattern is deliberately loose enough to allow "McKay" or "MacDonald"
+    // (a capital letter partway through a real surname), which would
+    // otherwise just as happily swallow an unrecognised all-caps token too.
+    if (/^[A-Z]{2,}\.?$/.test(word)) break;
+    // A capitalised word — including one with a second capital partway
+    // through, like "McKay" or "O'Brien" — or an initial like "M.". The
+    // trailing "." is allowed either way, because the last name in a
+    // sentence carries the full stop right on it ("...owner: Jane
+    // Kimball.") and there is nothing here to tell that apart from a
+    // genuine abbreviation.
+    if (/^[A-Z][A-Za-z'-]*\.?$/.test(word) || /^[A-Z]\.$/.test(word)) {
+      taken.push(word);
+      realNameWords++;
+      // A period ends the name-phrase either way — stop here rather than
+      // reading into the next sentence, which is also capitalised as often
+      // as not ("Owner: Sarah Chen. She has practiced..." must not swallow
+      // "She").
+      if (word.endsWith('.')) break;
+      continue;
+    }
+    break;
+  }
+
+  if (realNameWords < 2) return null;
+
+  // Now that matching is done, a sentence-ending "." on the last word is
+  // punctuation, not part of the name — drop it unless what is left is a
+  // single letter, which means it was actually an initial.
+  const last = taken[taken.length - 1];
+  if (last.endsWith('.') && last.length > 2) {
+    taken[taken.length - 1] = last.slice(0, -1);
+  }
+
+  return taken.join(' ');
+}
+
+export type OwnerNameSignal = {
+  name: string;
+  /** Which phrase in OWNER_PHRASES matched. */
+  phrase: string;
+  context: string;
+};
+
+/**
+ * Looks for the page stating, in so many words, who owns or founded the
+ * practice. Meant to run on pages Step 4 already fetched for email — this is
+ * a free by-product of that fetch, not a reason for a new one.
+ *
+ * Returns the name found so it can be compared against NPPES's Authorized
+ * Official, not merged into it automatically: NPPES stays the field of
+ * record unless a person looks at both and decides the site is right.
+ */
+export function detectOwnerName(text: string): OwnerNameSignal | null {
+  const flat = text
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&[a-z]+;|&#\d+;/gi, ' ')
+    .replace(/\s+/g, ' ');
+  const lower = flat.toLowerCase();
+
+  for (const phrase of OWNER_PHRASES) {
+    let from = 0;
+    for (;;) {
+      const at = lower.indexOf(phrase, from);
+      if (at === -1) break;
+      from = at + phrase.length;
+
+      const after = flat.slice(at + phrase.length, at + phrase.length + 60);
+      const name = looksLikePersonName(after);
+      if (!name) continue;
+
+      const start = Math.max(0, flat.lastIndexOf('.', at) + 1);
+      const stop = flat.indexOf('.', at + phrase.length);
+      // An "about the owner" bio is often one long run-on sentence with no
+      // period for a while, so — unlike detectAcquisition, which discards a
+      // match whose sentence runs unusually long — nothing here rejects the
+      // match just because of that. The name was already confirmed from the
+      // tightly-bounded `after` slice above; the context below is only ever
+      // used for display, and is truncated for that regardless.
+      const context =
+        stop === -1
+          ? flat.slice(start, Math.min(flat.length, at + phrase.length + 200)).trim()
+          : flat.slice(start, stop + 1).trim();
+
+      if (looksLikeCode(context)) continue;
+
+      return { name, phrase, context: (context || after.trim()).slice(0, 300) };
+    }
+  }
+
+  return null;
 }

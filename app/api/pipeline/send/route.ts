@@ -1,5 +1,7 @@
 import prisma from '../../../../lib/prisma';
 import { mapWithConcurrency } from '../../../../lib/webVerify';
+import { resolveScope, scopeWhere, describeScope } from '../../../../lib/scope';
+import { nameLikelyMatches } from '../../../../lib/nppes';
 import {
   buildCsv,
   splitName,
@@ -20,6 +22,11 @@ type SendRequest = {
   concurrency?: number;
   mode?: 'csv' | 'api';
   resend?: boolean;
+  allowRiskyEmails?: boolean;
+  cities?: string;
+  zips?: string;
+  radiusZip?: string;
+  radiusMiles?: number;
 };
 
 /**
@@ -29,6 +36,10 @@ type SendRequest = {
  * channel, and a row without one is noise on import. Leads already queued or sent
  * are skipped too unless `resend` is set, so pressing the button twice cannot mail
  * the same practice twice.
+ *
+ * Addresses that Step 4 verified as invalid or disposable never leave this route:
+ * one bad send costs more than the lead is worth, because it is the sending domain
+ * that pays for it.
  */
 export async function POST(req: Request) {
   let body: SendRequest = {};
@@ -39,13 +50,35 @@ export async function POST(req: Request) {
   }
 
   const tags = body.tags?.length ? body.tags : ['HOT'];
-  const stateList = (body.states ?? '')
-    .split(',')
-    .map((s) => s.trim().toUpperCase())
-    .filter(Boolean);
+  const scope = resolveScope(body);
   const limit = Math.max(1, Math.min(Number(body.limit) || 500, 5000));
   const concurrency = Math.max(1, Math.min(Number(body.concurrency) || 3, 10));
   const resend = Boolean(body.resend);
+  const allowRiskyEmails = Boolean(body.allowRiskyEmails);
+
+  // Anything Step 4 could not positively confirm. Excluded by default, because a
+  // catch-all server accepting the address is not the same as a mailbox existing.
+  const allowedStatuses = allowRiskyEmails
+    ? ['ok', 'mx_ok', 'catch_all', 'unknown']
+    : ['ok', 'mx_ok'];
+
+  // A null status means the contact predates verification — it passes, which is
+  // no worse than the behaviour before Step 4 learned to verify.
+  const emailIsUsable = {
+    decisionMakerEmail: { not: null },
+    OR: [{ emailVerifyStatus: null }, { emailVerifyStatus: { in: allowedStatuses } }],
+  };
+
+  // Step 2 drops a closed practice to EXCLUDE, but only on its next run. Guarding
+  // here too means a listing found after the last scoring pass still cannot be
+  // mailed — the tag and the send filter would otherwise disagree for a whole run.
+  //
+  // Written as an explicit OR rather than `NOT: { gbpStatus: 'CLOSED_PERMANENTLY' }`
+  // or `gbpStatus: { not: '...' }`: both compile to SQL's `!=`, which never matches
+  // a NULL column under three-valued logic — so either form silently excludes every
+  // lead Step 3 hasn't run Maps on yet, which on a fresh scope is all of them. Proven
+  // live: the plain NOT dropped 344/344 Utah HOT leads to zero before this fix.
+  const notClosed = { OR: [{ gbpStatus: null }, { gbpStatus: { not: 'CLOSED_PERMANENTLY' } }] };
 
   const config = readInstantlyConfig();
   const mode: 'csv' | 'api' = body.mode === 'api' && config ? 'api' : 'csv';
@@ -69,20 +102,46 @@ export async function POST(req: Request) {
           });
         }
 
-        const candidates = await prisma.lead.findMany({
+        send({ type: 'log', message: `Scope: ${describeScope(scope)}.` });
+        for (const warning of scope.warnings) send({ type: 'log', message: `Scope warning: ${warning}.` });
+
+        const closedCount = await prisma.lead.count({
           where: {
             tag: { in: tags },
-            ...(stateList.length ? { state: { in: stateList } } : {}),
-            contact: { is: { decisionMakerEmail: { not: null } } },
-            ...(resend
-              ? {}
-              : { OR: [{ outreach: { is: null } }, { outreach: { is: { emailStatus: 'Not sent' } } }] }),
+            ...scopeWhere(scope),
+            contact: { is: emailIsUsable },
+            gbpStatus: 'CLOSED_PERMANENTLY',
+          },
+        });
+        if (closedCount > 0) {
+          send({
+            type: 'log',
+            message: `${closedCount.toLocaleString()} skipped — Google reports them permanently closed.`,
+          });
+        }
+
+        const candidates = await prisma.lead.findMany({
+          // Combined as an explicit AND array rather than spread: notClosed and
+          // the not-already-sent guard both carry a top-level OR, and spreading
+          // two fragments that share a key means the second one silently wins
+          // and the first is dropped rather than combined.
+          where: {
+            AND: [
+              { tag: { in: tags } },
+              scopeWhere(scope),
+              notClosed,
+              { contact: { is: emailIsUsable } },
+              ...(resend
+                ? []
+                : [{ OR: [{ outreach: { is: null } }, { outreach: { is: { emailStatus: 'Not sent' } } }] }]),
+            ],
           },
           orderBy: [{ score: 'desc' }, { id: 'asc' }],
           take: limit,
           select: {
             id: true, leadKey: true, organization: true, city: true, state: true, score: true,
-            phone: true, website_found: true,
+            phone: true, website_found: true, linkedinUrl: true,
+            county: true, timezone: true, alternateOfficialPhone: true, webOwnerName: true,
             contact: {
               select: { decisionMakerName: true, decisionMakerTitle: true, decisionMakerEmail: true, decisionMakerPhone: true },
             },
@@ -92,17 +151,42 @@ export async function POST(req: Request) {
         const withEmail = await prisma.lead.count({
           where: {
             tag: { in: tags },
-            ...(stateList.length ? { state: { in: stateList } } : {}),
-            contact: { is: { decisionMakerEmail: { not: null } } },
+            ...scopeWhere(scope),
+            ...notClosed,
+            contact: { is: emailIsUsable },
           },
         });
+
+        // Counted separately so the log can explain a shortfall rather than just
+        // reporting a smaller number than Step 4 did.
+        const failedVerification = await prisma.lead.count({
+          where: {
+            tag: { in: tags },
+            ...scopeWhere(scope),
+            contact: {
+              is: {
+                decisionMakerEmail: { not: null },
+                emailVerifyStatus: { notIn: allowedStatuses },
+              },
+            },
+          },
+        });
+
+        if (failedVerification > 0) {
+          send({
+            type: 'log',
+            message:
+              `${failedVerification.toLocaleString()} address${failedVerification === 1 ? '' : 'es'} held back by verification` +
+              `${allowRiskyEmails ? '' : ' — catch-all and unknown are excluded; tick "allow risky" to include them'}.`,
+          });
+        }
 
         if (candidates.length === 0) {
           send({
             type: 'error',
             message:
               withEmail === 0
-                ? `No ${tags.join('/')} leads have an email address. Run Step 4, or add websites in Step 3 first.`
+                ? `No ${tags.join('/')} leads have a sendable email address. Run Step 4, or add websites in Step 3 first.`
                 : `All ${withEmail} emailable leads were already queued or sent. Tick "re-send" to include them.`,
           });
           return;
@@ -120,9 +204,21 @@ export async function POST(req: Request) {
             phone: lead.contact?.decisionMakerPhone ?? lead.phone,
             title: lead.contact?.decisionMakerTitle ?? null,
             website: lead.website_found,
+            linkedin: lead.linkedinUrl,
             city: lead.city,
             state: lead.state,
+            county: lead.county,
+            timezone: lead.timezone,
             score: lead.score,
+            alternatePhone: lead.alternateOfficialPhone,
+            // Only carried through when it actually disagrees with NPPES — the
+            // common case (site confirms the same person, just with a title or
+            // credential attached) has nothing worth flagging in an export.
+            webOwnerName:
+              lead.webOwnerName &&
+              !(lead.contact?.decisionMakerName && nameLikelyMatches(lead.contact.decisionMakerName, lead.webOwnerName))
+                ? lead.webOwnerName
+                : null,
           };
         });
 

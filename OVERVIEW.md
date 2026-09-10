@@ -8,7 +8,7 @@ seconds, scores what survives the filter, resolves each practice to a live site,
 back rows with a named owner and a working phone number.
 
 **Stack:** Next.js 14 (App Router) · TypeScript · Prisma + SQLite · NDJSON streaming ·
-SerpAPI · Instantly v2
+Serper / SerpAPI · MillionVerifier · Instantly v2
 
 ---
 
@@ -24,7 +24,7 @@ is projected except where it says so.
 | Parse rate | **31k rows/s** | 3× faster than `csv-parser` |
 | Site resolution | **66%** | up from 12% on free sources |
 | Name + phone | **100%** | on every shortlisted lead |
-| Unit tests | **77** | scoring, extraction, CSV, blocklist |
+| Unit tests | **153** | scoring, extraction, CSV, blocklist, verification, geo |
 
 ---
 
@@ -32,6 +32,24 @@ is projected except where it says so.
 
 Five stages, each its own route. All stream NDJSON back to the browser, so a thirty-minute
 import reports progress instead of hanging on one request.
+
+### 00 · Scope — working
+
+States, cities, ZIPs and a radius, resolved once and applied identically by every
+stage. A radius expands against the US Census 2024 ZCTA gazetteer, shipped in the repo
+so it never depends on a third party being up. Prefixes are written `840*`.
+
+The same `Scope` produces both the Prisma filter used by stages 02-05 and the row-level
+test stage 01 runs against the raw CSV, so the two paths cannot drift apart. A preview
+endpoint resolves the filter as it is typed — a radius silently becomes dozens of ZIPs,
+and choosing a scope blind is how paid queries get spent on the wrong area.
+
+```
+33,791 ZIP centroids loaded
+states UT, within 25 mi of 84601 (28 ZIPs)  →  1,075 imported, 95 HOT
+states UT, cities PROVO/OREM                →    389 imported, 28 HOT
+states UT                                   →  4,553 imported, 344 HOT
+```
 
 ### 01 · Ingest — working
 
@@ -54,17 +72,34 @@ lead stores **the sentence explaining its own score**. Named health systems are 
 outright by a blocklist, independent of points.
 
 ```
-HOT 345  |  VERIFY 1,017  |  EXCLUDE 3,191
-118 removed by the hospital blocklist
-scored in 2.1s
+34,562 leads across UT, NV, ID, AZ, CO
+HOT 2,987  |  VERIFY 7,949  |  EXCLUDE 23,626
+435 removed by the hospital blocklist
+every HOT lead has a phone and a named decision maker
+scored in 53.9s
 ```
 
 ### 03 · Resolve website — working
 
 Three sources, cheapest first: NPPES electronic endpoints, then domain guessing from the
-trade name, then SerpAPI. Each candidate is fetched and scored against the lead's own phone,
-city, zip and street number, so a domain only counts as confirmed when the page proves it.
-**Paid search only fires on what the free tiers failed to resolve.**
+trade name, then paid search. Each candidate is fetched and scored against the lead's own
+phone, city, zip and street number, so a domain only counts as confirmed when the page proves
+it. **Paid search only fires on what the free tiers failed to resolve.**
+
+Optionally the Google Business Profile listing is fetched too, matched to the lead on
+phone first — a name like "FAMILY PRACTICE" matches dozens of listings in one city, a
+ten-digit number matches one. It carries what no organic result does: category, rating,
+review count, the trading name, and whether the practice has **permanently closed**.
+
+```
+EYE CLINIC & CONTACT LENS CENTER OF UTAH VALLEY PC
+  matched 85%  Eye Clinic & Aesthetics of Provo
+               Eye care center · 5.0 · 1,178 reviews
+```
+
+Serper and SerpAPI are both supported and either key works. Serper is preferred when both are
+set: resolution is bursty — one sweep per state, then a trickle — and Serper's credits do not
+expire where SerpAPI's monthly allowance does.
 
 ```
 found 66 | bot-blocked 12 | parked 1 | none 21
@@ -78,6 +113,12 @@ Name, title and phone come free from the NPI record's authorized official. Email
 exist in the source at all, so it is scraped from the resolved site — mailto links and
 contact pages, then ranked. An address matching the decision maker outranks a generic office
 inbox; placeholder and wrong-department addresses are dropped.
+
+Every surviving address is then verified, cheapest layer first. Syntax, a disposable-domain
+list and an MX lookup cost nothing and run always; MillionVerifier's mailbox-level check runs
+only on what clears them, so no credit is spent on an address already known to be bad. The
+verdict is stored on the contact and Step 5 filters on it — a rejected address is kept as
+evidence of what the site published rather than deleted.
 
 ```
 100%  jennymckaynp@mckayfamilypractice.com
@@ -121,6 +162,15 @@ queries rather than 100, and re-runs skip anything already resolved. The same or
 apply to enrichment: **a domain has to exist before it is worth paying to look up who works
 there.**
 
+### A failed lookup is not a negative answer
+
+The first MX check treated every DNS error as proof the domain was dead, which marked live
+practices invalid on nothing worse than a refused resolver — and an invalid verdict blocks a
+lead from Step 5 permanently. Only `ENOTFOUND` and `ENODATA` are answers now; anything else
+returns `unresolved` and is never cached. The same run also exposed that record queries were
+going to a stub resolver on `127.0.0.1` that refuses them, so MX lookups use explicit public
+resolvers with the OS resolver as the fallback.
+
 ### Extraction is ranked, not collected
 
 Both the email finder and the acquisition detector return a confidence and the evidence
@@ -142,14 +192,20 @@ resolved website is not searched again.
 | 5 states | 34,777 | 3,020 | measured — UT, NV, ID, AZ, CO |
 | All 50 states | 496,341 | ~37,500 | projected from a full-file count |
 
-| Service | Role | Monthly |
-|---|---|---|
-| SerpAPI / Serper | website resolution | $50 |
-| Email finder | domain → addresses | $20–50 |
-| Verifier | bounce protection | ~$1 |
-| Instantly | sending + reply tracking | $40–200 |
-| Mailboxes + domains | deliverability | $10–105 |
-| VPS | hosting | $6–40 |
+| Service | Role | Cost | Recurs? |
+|---|---|---|---|
+| Serper (preferred) | website resolution | $50 / 50k credits | no — credits do not expire |
+| — Business Profile | rating, category, closures | 1 extra query per lead | opt-in |
+| SerpAPI (alternative) | website resolution | $50 | monthly, allowance expires |
+| MillionVerifier | bounce protection | $27 / 100k credits | no — credits do not expire |
+| Email finder | domain → addresses | $39–104 | monthly while in use |
+| Instantly | sending + reply tracking | $37–97 | monthly |
+| Mailboxes + domains | deliverability | $10–105 | monthly |
+| VPS | hosting | $5–40 | monthly |
+
+A five-state pass needs about 2,600 search queries and verification for whatever email
+scraping yields, so **$77 covers the entire data build** and neither purchase renews. The
+recurring cost only starts at the sending layer.
 
 Roughly **$150–250/month** at 2,000 sends, **$300–450** at 10,000. A first national pass adds
 **$500–800 one-time** for the initial resolution and enrichment sweep. Vendor pricing should
@@ -165,9 +221,24 @@ Stated plainly, because these shape what can be promised.
 from resolved websites, so coverage tracks site resolution and stays well below phone
 coverage. Phone is 100%; treat this as a phone-first dataset.
 
+**Verification depth** — Without `MILLIONVERIFIER_KEY` the free layer proves the domain takes
+mail but never that the mailbox exists; those addresses are stored as `mx_ok` and still send,
+because holding them back would mail less than the pipeline did before it could verify at all.
+Only the paid layer distinguishes a live mailbox from a live domain.
+
 **Record staleness** — **41% of NPI records were last updated 10+ years ago.** Scoring
-penalises age, but no API can confirm the named official is still there. Nothing fixes this;
-it is the source data.
+penalises age, and a Google Business Profile reporting the practice permanently closed drops
+it to EXCLUDE outright, but no API can confirm the named official is still there.
+
+**Closure detection is only as good as the listing** — a practice with no Google presence,
+or one whose listing nobody has updated, reads as open. The closed path is unit-tested but
+has not yet been observed firing against a real closed practice, and an absent status means
+"not stated", never "confirmed open".
+
+**Radius is approximate** — ZCTAs are the Census approximation of a ZIP delivery area, not
+the postal boundary, so a practice a few hundred metres past the line can fall either way.
+PO-box-only and some military ZIPs have no centroid at all; a radius around one warns and
+applies no ZIP filter, which widens the scope rather than narrowing it — read the preview.
 
 **Verify throughput** — 2.7s per lead at concurrency 4. Fine for a few thousand, **roughly 28
 hours for a national run**. Needs a resumable queue before that is attempted.
@@ -190,6 +261,7 @@ month means 10–15 warmed domains and mailboxes — **a separate build from thi
 | CRM table | Partial | Schema holds every column; the UI shows six, capped at 50 rows. No sorting, filtering or inline editing. |
 | Pipeline stages | Partial | Field exists with all seven stages; nothing writes to it. |
 | Dialer | Partial | Renders a lead and a call script. The buttons do not persist an outcome. |
+| Enrichment | Not built | `APOLLO_API_KEY` is read from `.env` and nothing uses it. Email comes from scraping only. |
 | Reply queue | Not built | Needs the Instantly webhook, a draft table, and an approval screen. Nothing auto-sends by design. |
 | Invoicing | Not built | `Client` model exists and has never held a row. No conversion trigger, no ledger, no PDF. |
 | Scheduling | Not built | No headless runner and no cron; every stage is triggered from the UI. |
@@ -202,6 +274,7 @@ month means 10–15 warmed domains and mailboxes — **a separate build from thi
 app/
   api/pipeline/
     files/      list CSVs in the data folders
+    scope/      resolve a geographic filter and preview what it selects
     filter/     stage 01 — ingest, group, upsert
     score/      stage 02 — scoring + blocklist
     verify/     stage 03 — website resolution
@@ -210,19 +283,25 @@ app/
   pipeline/     the five-stage runner UI
   crm/ dialer/ clients/    read-only today
   components/StateSelect   multi-state picker
+  components/AreaFilter    city / ZIP / radius, with a live preview
 
 lib/
-  nppes.ts      CSV splitter, header index, name normalisation, lead keys
-  scoring.ts    pure scoring function
-  blocklist.ts  health-system matching
-  webVerify.ts  candidate domains, page match scoring, acquisition detection
-  serpapi.ts    paid search, directory filtering
-  contacts.ts   email extraction and ranking
-  instantly.ts  CSV builder + Instantly v2 client
-  dataDir.ts    resolves data folders, path-traversal guard
-  usStates.ts   NPPES location codes
+  nppes.ts       CSV splitter, header index, name normalisation, lead keys
+  scoring.ts     pure scoring function
+  blocklist.ts   health-system matching
+  webVerify.ts   candidate domains, page match scoring, acquisition detection
+  search.ts      Serper / SerpAPI web + maps, directory filtering
+  scope.ts       states / cities / ZIPs / radius, one resolver for every stage
+  geo.ts         ZIP centroids, haversine, radius expansion
+  contacts.ts    email extraction and ranking
+  emailVerify.ts syntax, MX and MillionVerifier layers
+  instantly.ts   CSV builder + Instantly v2 client
+  dataDir.ts     resolves data folders, path-traversal guard
+  usStates.ts    NPPES location codes
 
+tests/                           91 assertions, one process per file — `npm test`
 config/hospital-blocklist.json   editable, reloaded on change
+config/zip-centroids.txt         33,791 ZIPs, US Census 2024 Gazetteer
 scripts/backfillLeadKeys.ts      one-time migration
 prisma/schema.prisma             Lead, Contact, Outreach, ResponseLog, Client, Suppression
 ```
@@ -234,6 +313,7 @@ prisma/schema.prisma             Lead, Contact, Outreach, ResponseLog, Client, S
 ```bash
 npm ci
 npx prisma generate && npx prisma db push
+npm test
 npm run build && npm start
 ```
 
@@ -242,11 +322,17 @@ npm run build && npm start
 ```
 DATABASE_URL="file:./dev.db"
 NPPES_DATA_DIR="/path/to/NPPES_Data_Dissemination_..."   # keeps the 11 GB file out of the repo
+SERPER_KEY=              # step 3 — preferred; SERPAPI_KEY also works
 SERPAPI_KEY=
-APOLLO_API_KEY=
+MILLIONVERIFIER_KEY=     # step 4 — without it, syntax and MX still run
+APOLLO_API_KEY=          # read but unused
 INSTANTLY_API_KEY=
 INSTANTLY_CAMPAIGN_ID=
+DNS_SERVERS=             # optional, defaults to 1.1.1.1,8.8.8.8
 ```
+
+Steps 1 and 2 need no key at all. Step 3 falls back to free sources without one, Step 4 to
+syntax and MX, and Step 5 to CSV export.
 
 Behind nginx, the long streaming runs need:
 

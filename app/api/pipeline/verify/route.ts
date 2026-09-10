@@ -12,7 +12,9 @@ import {
   scorePageMatch,
   mapWithConcurrency,
 } from '../../../../lib/webVerify';
-import { serpApiConfigured, serpApiSearch, buildQuery } from '../../../../lib/serpapi';
+import { searchConfigured, searchProvider, webSearch, mapsSearch, buildQuery } from '../../../../lib/search';
+import { pickPlace, placeIsClosed, PlaceMatch } from '../../../../lib/webVerify';
+import { resolveScope, scopeWhere, describeScope } from '../../../../lib/scope';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -28,6 +30,11 @@ type VerifyRequest = {
   concurrency?: number;
   useSerpApi?: boolean;
   recheck?: boolean;
+  useGbp?: boolean;
+  cities?: string;
+  zips?: string;
+  radiusZip?: string;
+  radiusMiles?: number;
 };
 
 /**
@@ -47,15 +54,14 @@ export async function POST(req: Request) {
   }
 
   const tags = body.tags?.length ? body.tags : ['HOT'];
-  const stateList = (body.states ?? '')
-    .split(',')
-    .map((s) => s.trim().toUpperCase())
-    .filter(Boolean);
   const limit = Math.max(1, Math.min(Number(body.limit) || 100, 5000));
   const minConfidence = Number.isFinite(body.minConfidence) ? Number(body.minConfidence) : 40;
   const concurrency = Math.max(1, Math.min(Number(body.concurrency) || 5, 20));
   const wantSerpApi = Boolean(body.useSerpApi);
   const recheck = Boolean(body.recheck);
+  const scope = resolveScope(body);
+  // Maps costs the same as a web search, so it is opt-in rather than automatic.
+  const wantGbp = Boolean(body.useGbp);
 
   const encoder = new TextEncoder();
 
@@ -68,10 +74,13 @@ export async function POST(req: Request) {
       try {
         const startedAt = Date.now();
 
+        send({ type: 'log', message: `Scope: ${describeScope(scope)}.` });
+        for (const warning of scope.warnings) send({ type: 'log', message: `Scope warning: ${warning}.` });
+
         const leads = await prisma.lead.findMany({
           where: {
             tag: { in: tags },
-            ...(stateList.length ? { state: { in: stateList } } : {}),
+            ...scopeWhere(scope),
             ...(recheck ? {} : { websiteCheckedAt: null }),
           },
           orderBy: [{ score: 'desc' }, { id: 'asc' }],
@@ -103,18 +112,27 @@ export async function POST(req: Request) {
           send
         );
 
-        const serpApiReady = wantSerpApi && serpApiConfigured();
-        if (wantSerpApi && !serpApiReady) {
+        const searchReady = wantSerpApi && searchConfigured();
+        const provider = searchProvider();
+        if (wantSerpApi && !searchReady) {
           send({
             type: 'log',
-            message: 'SerpAPI requested but SERPAPI_KEY is not set — running free sources only.',
+            message: 'Paid search requested but no key is set — add SERPER_KEY or SERPAPI_KEY to .env. Running free sources only.',
+          });
+        } else if (searchReady) {
+          send({
+            type: 'log',
+            message:
+              `Paid search enabled via ${provider}` +
+              (wantGbp ? ' — Google Business Profile lookup on (one extra query per unresolved lead).' : '.'),
           });
         }
 
         const stats = {
           found: 0, blocked: 0, parked: 0, none: 0, acquisitions: 0,
-          bySource: { endpoint: 0, guess: 0, serpapi: 0 } as Record<string, number>,
-          serpApiCalls: 0,
+          bySource: { endpoint: 0, guess: 0, search: 0, gbp: 0 } as Record<string, number>,
+          searchCalls: 0, linkedinFound: 0,
+          gbpCalls: 0, gbpMatched: 0, gbpClosed: 0,
         };
         let processed = 0;
 
@@ -122,9 +140,14 @@ export async function POST(req: Request) {
           const target: VerifyTarget = lead;
           // Held on an object rather than a plain `let`: TypeScript cannot see
           // assignments made inside keepBetter() and would narrow it to null.
-          const state: { best: Candidate | null; acquisition: AcquisitionSignal | null } = {
+          const state: {
+            best: Candidate | null;
+            acquisition: AcquisitionSignal | null;
+            linkedIn: string | null;
+          } = {
             best: null,
             acquisition: null,
+            linkedIn: null,
           };
 
           /** Fetches one host and keeps it only if it beats what we already have. */
@@ -156,11 +179,50 @@ export async function POST(req: Request) {
             }
           }
 
-          // --- Source 3: paid search, only for what is still unresolved ------
-          if (serpApiReady && confidenceSoFar() < minConfidence) {
+          // --- Source 3: the Google Business Profile listing -----------------
+          // Runs before web search because a matched listing answers two questions
+          // at once — the website, and whether the practice is still trading.
+          let place: PlaceMatch | null = null;
+          if (searchReady && wantGbp && confidenceSoFar() < minConfidence) {
             try {
-              stats.serpApiCalls++;
-              const hits = await serpApiSearch(buildQuery(lead.organization, lead.city, lead.state));
+              stats.gbpCalls++;
+              const places = await mapsSearch(buildQuery(lead.organization, lead.city, lead.state));
+              place = pickPlace(target, places);
+
+              if (place) {
+                stats.gbpMatched++;
+                if (placeIsClosed(place.place.status)) stats.gbpClosed++;
+
+                if (place.place.website) {
+                  try {
+                    keepBetter(await consider(new URL(place.place.website).hostname, 'gbp'));
+                  } catch {
+                    // A listing can carry a malformed URL; the lead still keeps
+                    // everything else the listing told us.
+                  }
+                }
+              }
+            } catch (e) {
+              send({
+                type: 'log',
+                message: `Maps lookup failed for ${lead.organization}: ${e instanceof Error ? e.message : String(e)}`,
+              });
+            }
+          }
+
+          // --- Source 4: paid search, only for what is still unresolved ------
+          if (searchReady && confidenceSoFar() < minConfidence) {
+            try {
+              stats.searchCalls++;
+              const { hits, linkedIn } = await webSearch(buildQuery(lead.organization, lead.city, lead.state));
+
+              // Free byproduct of the same query — linkedin.com is filtered out of
+              // `hits` below because it is never the practice's own site, but the
+              // page was already paid for, so the LinkedIn link is worth keeping.
+              if (linkedIn) {
+                state.linkedIn = linkedIn;
+                stats.linkedinFound++;
+              }
 
               // A search snippet often states the acquisition more plainly than the
               // practice's own homepage does, so read them before following links.
@@ -173,13 +235,13 @@ export async function POST(req: Request) {
               }
 
               for (const hit of hits.slice(0, 3)) {
-                keepBetter(await consider(new URL(hit.link).hostname, 'serpapi'));
+                keepBetter(await consider(new URL(hit.link).hostname, 'search'));
                 if (confidenceSoFar() >= minConfidence) break;
               }
             } catch (e) {
               send({
                 type: 'log',
-                message: `SerpAPI failed for ${lead.organization}: ${e instanceof Error ? e.message : String(e)}`,
+                message: `Search failed for ${lead.organization}: ${e instanceof Error ? e.message : String(e)}`,
               });
             }
           }
@@ -211,9 +273,31 @@ export async function POST(req: Request) {
                 ? `ACQUIRED? "${acquisition.phrase}" — ${acquisition.context}`
                 : winner?.snippet ?? 'no candidate produced',
               websiteCheckedAt: new Date(),
+              ...(place
+                ? {
+                    gbpPlaceId: place.place.placeId || null,
+                    gbpName: place.place.name || null,
+                    gbpCategory: place.place.category || null,
+                    gbpRating: place.place.rating,
+                    gbpReviews: place.place.reviews,
+                    gbpPhone: place.place.phone || null,
+                    gbpWebsite: place.place.website || null,
+                    gbpStatus: place.place.status || null,
+                    gbpMatchConfidence: place.confidence,
+                    gbpCheckedAt: new Date(),
+                  }
+                : wantGbp
+                  ? { gbpCheckedAt: new Date() }
+                  : {}),
               // Only ever set here, never cleared: an earlier run may have found the
-              // evidence on a page that has since been taken down.
-              ...(acquisition ? { possible_acquisition: true } : {}),
+              // evidence on a page that has since been taken down. Step 2 reads this
+              // back as a hard exclude — see the field comment in schema.prisma for
+              // why it is not the same column Step 2 itself writes to.
+              ...(acquisition ? { webAcquisitionFlag: true } : {}),
+              // Same reasoning as the acquisition flag: omitted rather than set to
+              // null when this run found nothing, so a page that no longer surfaces
+              // in search results does not erase a LinkedIn link found earlier.
+              ...(state.linkedIn ? { linkedinUrl: state.linkedIn } : {}),
             },
           });
 
@@ -237,15 +321,39 @@ export async function POST(req: Request) {
             `Websites found ${stats.found.toLocaleString()} | bot-blocked ${stats.blocked} | ` +
             `parked ${stats.parked} | nothing ${stats.none}`,
         });
+        if (stats.gbpCalls > 0) {
+          send({
+            type: 'log',
+            message:
+              `Google Business Profile — ${stats.gbpCalls} looked up, ${stats.gbpMatched} matched, ` +
+              `${stats.gbpClosed} reported permanently closed` +
+              (stats.gbpClosed ? '. Re-run Step 2 to drop those to EXCLUDE.' : '.'),
+          });
+        }
+        if (stats.searchCalls > 0) {
+          send({
+            type: 'log',
+            message: `LinkedIn — ${stats.linkedinFound} company or personal page${stats.linkedinFound === 1 ? '' : 's'} found (read from the same search results, no extra query).`,
+          });
+        }
+
         send({
           type: 'log',
           message:
             `By source — endpoint ${stats.bySource.endpoint}, guessed ${stats.bySource.guess}, ` +
-            `search ${stats.bySource.serpapi}${stats.serpApiCalls ? ` (${stats.serpApiCalls} paid queries)` : ''}`,
+            `search ${stats.bySource.search}, gbp ${stats.bySource.gbp}` +
+            `${stats.searchCalls || stats.gbpCalls ? ` (${stats.searchCalls + stats.gbpCalls} paid queries)` : ''}`,
         });
 
+        // Filtered by when it was checked, not an `id IN (...)` list of every
+        // lead this run touched — at full multi-state scale that list is
+        // thousands of ids, and combined with a NOT/negation filter
+        // (website_found: not null) in the same query, SQLite's parameter
+        // limit rejects it outright because Prisma cannot split that
+        // combination across batches. Caught at 2,996 HOT leads across 5
+        // states; this is only ever a handful of sample rows for the log.
         const samples = await prisma.lead.findMany({
-          where: { id: { in: leads.map((l) => l.id) }, website_found: { not: null } },
+          where: { websiteCheckedAt: { gte: new Date(startedAt) }, website_found: { not: null } },
           orderBy: { websiteConfidence: 'desc' },
           take: 5,
           select: { organization: true, website_found: true, websiteConfidence: true, search_snippet: true },
@@ -262,7 +370,7 @@ export async function POST(req: Request) {
             type: 'log',
             message:
               `${stats.acquisitions.toLocaleString()} flagged as possibly acquired — ` +
-              `their reason field carries the sentence that said so.`,
+              `their reason field carries the sentence that said so. Re-run Step 2 to drop those to EXCLUDE.`,
           });
         }
 

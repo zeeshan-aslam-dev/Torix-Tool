@@ -34,7 +34,10 @@ export default async function CRMPage() {
             <tr>
               <th>Organization</th>
               <th>Location</th>
+              <th>Time Zone / County</th>
               <th>Providers</th>
+              <th>Owner</th>
+              <th>Phones</th>
               <th>Website</th>
               <th>Tag</th>
               <th>Action</th>
@@ -43,39 +46,81 @@ export default async function CRMPage() {
           <tbody>
             {leads.length === 0 ? (
               <tr>
-                <td colSpan={6} style={{ textAlign: 'center', color: 'var(--text-muted)' }}>
+                <td colSpan={9} style={{ textAlign: 'center', color: 'var(--text-muted)' }}>
                   No leads found. Run the pipeline to import data.
                 </td>
               </tr>
             ) : (
-              leads.map((lead) => (
-                <tr key={lead.id}>
-                  <td style={{ fontWeight: 500 }}>{lead.organization}</td>
-                  <td>{lead.city}, {lead.state}</td>
-                  <td>{lead.n_providers_at_location}</td>
-                  <td>
-                    {lead.website_found ? (
-                      <a href={lead.website_found} target="_blank" rel="noreferrer" className={styles.link}>
-                        Visit
-                      </a>
-                    ) : (
-                      <span style={{ color: 'var(--text-muted)' }}>-</span>
-                    )}
-                  </td>
-                  <td>
-                    <span className={classNames(styles.tag, {
-                      [styles.tagHot]: lead.tag === "HOT",
-                      [styles.tagVerify]: lead.tag === "VERIFY",
-                      [styles.tagExclude]: lead.tag === "EXCLUDE",
-                    })}>
-                      {lead.tag}
-                    </span>
-                  </td>
-                  <td>
-                    <Link href={`/dialer?lead=${lead.id}`} className="btn">Call</Link>
-                  </td>
-                </tr>
-              ))
+              leads.map((lead) => {
+                // NPPES stays the field of record — a name the site itself
+                // published is shown as a flag to check, never swapped in.
+                const ownerDisagrees = Boolean(
+                  lead.webOwnerName &&
+                  lead.authorizedOfficialName &&
+                  lead.webOwnerName.toUpperCase() !== lead.authorizedOfficialName.toUpperCase()
+                );
+
+                return (
+                  <tr key={lead.id}>
+                    <td style={{ fontWeight: 500 }}>{lead.organization}</td>
+                    <td>{lead.city}, {lead.state}</td>
+                    <td>
+                      {lead.timezone || <span className={styles.muted}>-</span>}
+                      {lead.county && <span className={styles.sub}>{lead.county}</span>}
+                    </td>
+                    <td>{lead.n_providers_at_location}</td>
+                    <td>
+                      {lead.authorizedOfficialName ? (
+                        <>
+                          {lead.authorizedOfficialName}
+                          {lead.authorizedOfficialTitle && (
+                            <span className={styles.sub}>{lead.authorizedOfficialTitle}</span>
+                          )}
+                          {ownerDisagrees && (
+                            <span
+                              className={styles.flag}
+                              title={`Site says "${lead.webOwnerName}" (${lead.webOwnerNameSource})`}
+                            >
+                              site says otherwise
+                            </span>
+                          )}
+                        </>
+                      ) : (
+                        <span className={styles.muted}>-</span>
+                      )}
+                    </td>
+                    <td>
+                      {lead.phone || <span className={styles.muted}>-</span>}
+                      {lead.alternateOfficialPhone && (
+                        <span className={styles.sub} title={`From NPI ${lead.alternateOfficialNpi}`}>
+                          alt: {lead.alternateOfficialPhone}
+                        </span>
+                      )}
+                    </td>
+                    <td>
+                      {lead.website_found ? (
+                        <a href={lead.website_found} target="_blank" rel="noreferrer" className={styles.link}>
+                          Visit
+                        </a>
+                      ) : (
+                        <span className={styles.muted}>-</span>
+                      )}
+                    </td>
+                    <td>
+                      <span className={classNames(styles.tag, {
+                        [styles.tagHot]: lead.tag === "HOT",
+                        [styles.tagVerify]: lead.tag === "VERIFY",
+                        [styles.tagExclude]: lead.tag === "EXCLUDE",
+                      })}>
+                        {lead.tag}
+                      </span>
+                    </td>
+                    <td>
+                      <Link href={`/dialer?lead=${lead.id}`} className="btn">Call</Link>
+                    </td>
+                  </tr>
+                );
+              })
             )}
           </tbody>
         </table>
