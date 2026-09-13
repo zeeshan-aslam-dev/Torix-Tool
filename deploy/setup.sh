@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# One-time provisioning for a fresh Ubuntu 24.04 VPS.
+# One-time provisioning for a fresh Ubuntu VPS (tested on 24.04 and 26.04).
 #
 # What this does, in order:
 #   1. Adds 2GB swap (the box currently has none — cheap insurance against a
@@ -15,7 +15,8 @@
 #
 # Measured resource use (national NPPES scan, the heaviest operation this
 # tool does): 468 MB peak RSS, ~13 GB disk for the source file + database.
-# A 2 vCPU / 5.8 GB / 46 GB box has several times that headroom.
+# A Hostinger KVM 2 box (2 vCPU, several GB RAM, 100GB+ disk) has several
+# times that headroom.
 
 set -euo pipefail
 
@@ -23,7 +24,12 @@ REPO_URL="https://github.com/zeeshan-aslam-dev/Torix-Tool.git"
 APP_USER="torix"
 APP_DIR="/opt/torix-tool"
 NPPES_DIR="/opt/nppes-data"
-DOMAIN_OR_IP="45.131.64.102"
+# Hostinger auto-assigns this hostname to every VPS (see hPanel > VPS >
+# Overview) and it already resolves to the box's IP — using it here (instead
+# of the bare IP) is what lets Step 7 of DEPLOY-GUIDE.md get a free real
+# Let's Encrypt certificate later. The bare IP still works to reach the app
+# in the meantime; nginx serves either since this is the only site enabled.
+DOMAIN_OR_IP="srv1976742.hstgr.cloud"
 
 echo "== 1/6  swap =="
 if [ "$(swapon --show | wc -l)" -eq 0 ]; then

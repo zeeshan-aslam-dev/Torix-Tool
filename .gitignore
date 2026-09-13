@@ -43,3 +43,11 @@ next-env.d.ts
 /data/*
 !/data/.gitkeep
 !/data/README.md
+
+# Generated data exports (contain real lead PII)
+exports/
+
+# Local pipeline database — real lead PII, and it grows past GitHub's 100MB
+# limit as more states are imported. Deploy it to the VPS via DEPLOY-GUIDE.md
+# Step 3 instead of committing it.
+prisma/dev.db
