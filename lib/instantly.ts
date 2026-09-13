@@ -31,6 +31,8 @@ export type SendableLead = {
   alternatePhone: string | null;
   /** A name the practice's own site gave for its owner, when it differs from NPPES. */
   webOwnerName: string | null;
+  /** The phone number on the business's own Google Business Profile listing — see Step 3. Often kept fresher than the NPPES-registered number, since owners maintain it for customers. */
+  gbpPhone: string | null;
 };
 
 /**
@@ -54,6 +56,7 @@ const CSV_COLUMNS: { header: string; get: (lead: SendableLead) => string }[] = [
   { header: 'Time Zone', get: (l) => l.timezone ?? '' },
   { header: 'County', get: (l) => l.county ?? '' },
   { header: 'Alternate Phone', get: (l) => l.alternatePhone ?? '' },
+  { header: 'Google Business Phone', get: (l) => l.gbpPhone ?? '' },
   // Never the value Torix itself relies on — that stays authorizedOfficialName /
   // the "Title" column above. This is only here so whoever works the list can
   // see the site disagreed with NPPES without opening the CRM to find out.
@@ -140,6 +143,7 @@ export async function pushToInstantly(
           timezone: lead.timezone ?? '',
           county: lead.county ?? '',
           alternate_phone: lead.alternatePhone ?? '',
+          gbp_phone: lead.gbpPhone ?? '',
           site_stated_owner: lead.webOwnerName ?? '',
         },
       }),
