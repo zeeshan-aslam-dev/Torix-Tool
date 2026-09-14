@@ -90,7 +90,7 @@ export type WebSearchResult = {
  * read out of the raw results before that filter runs, rather than spending a
  * second query on a dedicated LinkedIn search.
  */
-export async function webSearch(query: string, timeoutMs = 15000): Promise<WebSearchResult> {
+export async function webSearch(query: string, timeoutMs = 28000): Promise<WebSearchResult> {
   const provider = searchProvider();
   if (!provider) throw new Error('No search key set — add SERPER_KEY or SERPAPI_KEY to .env');
 
@@ -239,7 +239,7 @@ function toPlace(raw: Record<string, unknown>): PlaceHit {
 }
 
 /** Runs one Google Maps search through whichever provider is configured. */
-export async function mapsSearch(query: string, timeoutMs = 15000): Promise<PlaceHit[]> {
+export async function mapsSearch(query: string, timeoutMs = 28000): Promise<PlaceHit[]> {
   const provider = searchProvider();
   if (!provider) throw new Error('No search key set — add SERPER_KEY or SERPAPI_KEY to .env');
 
