@@ -9,6 +9,8 @@ import {
   fetchPage,
   titleCase,
   EmailCandidate,
+  ContactExportRow,
+  buildContactsCsv,
 } from '../../../../lib/contacts';
 import {
   verifyEmail,
@@ -93,9 +95,10 @@ export async function POST(req: Request) {
           orderBy: [{ score: 'desc' }, { id: 'asc' }],
           take: limit,
           select: {
-            id: true, organization: true, city: true, phone: true,
+            id: true, organization: true, city: true, state: true, phone: true,
             authorizedOfficialName: true, authorizedOfficialTitle: true,
             authorizedOfficialPhone: true, website_found: true,
+            score: true, tag: true,
           },
         });
 
@@ -131,6 +134,10 @@ export async function POST(req: Request) {
           ownerFound: 0, ownerDisagreements: 0,
           verdicts: { ok: 0, mx_ok: 0, catch_all: 0, unknown: 0, invalid: 0, disposable: 0 } as Record<VerifyStatus, number>,
         };
+        // Every lead this run touches, not just the sendable ones — the CSV
+        // download offered at the end is meant to show a human everything Step
+        // 4 found, including rejected/unverified addresses Step 5 would skip.
+        const exportRows: ContactExportRow[] = [];
         let processed = 0;
 
         await mapWithConcurrency(leads, concurrency, async (lead) => {
@@ -231,6 +238,25 @@ export async function POST(req: Request) {
             });
           }
 
+          exportRows.push({
+            organization: lead.organization,
+            city: lead.city,
+            state: lead.state,
+            practicePhone: lead.phone,
+            decisionMakerName: name,
+            decisionMakerTitle: title,
+            decisionMakerPhone: phone,
+            email: acceptedEmail?.email ?? null,
+            emailConfidence: email?.confidence ?? null,
+            emailVerifyStatus: verdict?.status ?? null,
+            sendable,
+            website: lead.website_found,
+            linkedin: linkedIn,
+            webOwnerName: ownerDiffers ? webOwner!.name : null,
+            score: lead.score,
+            tag: lead.tag,
+          });
+
           // A re-check can drop an address that a later filter rejected. Anything
           // queued on the strength of it was never actually mailed, so release it
           // rather than leaving a dead row blocking a future send. Rows already
@@ -321,10 +347,15 @@ export async function POST(req: Request) {
           });
         }
 
+        const csv = buildContactsCsv(exportRows);
+        const filename = `step4-contacts-${new Date(startedAt).toISOString().slice(0, 10)}.csv`;
+
         send({
           type: 'done',
           processed,
           stats,
+          csv,
+          filename,
           elapsedMs: Date.now() - startedAt,
           message:
             `Built ${processed.toLocaleString()} contacts in ${((Date.now() - startedAt) / 1000).toFixed(0)}s — ` +

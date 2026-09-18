@@ -86,6 +86,7 @@ export default function PipelinePage() {
   const [sendMode, setSendMode] = useState<"csv" | "api">("csv");
   const [resend, setResend] = useState(false);
   const [csvReady, setCsvReady] = useState<{ csv: string; filename: string; rows: number } | null>(null);
+  const [contactsCsvReady, setContactsCsvReady] = useState<{ csv: string; filename: string; rows: number } | null>(null);
 
   const [hotThreshold, setHotThreshold] = useState(55);
   const [verifyThreshold, setVerifyThreshold] = useState(30);
@@ -266,6 +267,7 @@ export default function PipelinePage() {
     }
 
     addLog(`Building contacts for ${contactTags.join("/")} leads...`);
+    setContactsCsvReady(null);
 
     await runStream(
       "/api/pipeline/contacts",
@@ -282,6 +284,9 @@ export default function PipelinePage() {
             `Processed ${num(event.processed)} / ${num(event.total)} (${(event.percent ?? 0).toFixed(0)}%) — ` +
               `${num(event.emails)} emails found, ${num(event.sendable)} sendable`
           );
+        }
+        if (event.type === "done" && event.csv && event.filename) {
+          setContactsCsvReady({ csv: event.csv, filename: event.filename, rows: event.processed ?? 0 });
         }
       }
     );
@@ -318,18 +323,25 @@ export default function PipelinePage() {
     );
   };
 
-  const downloadCsv = () => {
-    if (!csvReady) return;
-    const blob = new Blob([csvReady.csv], { type: "text/csv;charset=utf-8" });
+  const downloadCsvFile = (file: { csv: string; filename: string }) => {
+    const blob = new Blob([file.csv], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = csvReady.filename;
+    a.download = file.filename;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-    addLog(`Downloaded ${csvReady.filename}`);
+    addLog(`Downloaded ${file.filename}`);
+  };
+
+  const downloadCsv = () => {
+    if (csvReady) downloadCsvFile(csvReady);
+  };
+
+  const downloadContactsCsv = () => {
+    if (contactsCsvReady) downloadCsvFile(contactsCsvReady);
   };
 
   const toggleSendTag = (tag: string) =>
@@ -837,6 +849,21 @@ export default function PipelinePage() {
                 />
                 Allow catch-all and unknown addresses through (higher volume, higher bounce risk)
               </label>
+
+              {contactsCsvReady && (
+                <div className={styles.csvReady}>
+                  <div>
+                    <strong>{contactsCsvReady.filename}</strong>
+                    <div className={styles.hint}>
+                      {contactsCsvReady.rows.toLocaleString()} leads processed — every one this run touched,
+                      not just the sendable ones
+                    </div>
+                  </div>
+                  <button className="btn btn-primary" onClick={downloadContactsCsv}>
+                    <Download size={16} /> Download CSV
+                  </button>
+                </div>
+              )}
 
               {logPanel}
 

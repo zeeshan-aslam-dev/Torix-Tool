@@ -63,7 +63,7 @@ const CSV_COLUMNS: { header: string; get: (lead: SendableLead) => string }[] = [
   { header: 'Site-Stated Owner (if different from NPPES)', get: (l) => l.webOwnerName ?? '' },
 ];
 
-function csvCell(value: string): string {
+export function csvCell(value: string): string {
   // Guard against a leading =, +, - or @ being run as a formula if the file is
   // opened in a spreadsheet before it reaches Instantly.
   const safe = /^[=+\-@]/.test(value) ? `'${value}` : value;

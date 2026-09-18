@@ -10,6 +10,8 @@
  * maker beats a generic office@ address, which in turn beats a careers@ inbox.
  */
 
+import { csvCell } from './instantly';
+
 export type EmailCandidate = {
   email: string;
   confidence: number;
@@ -235,4 +237,54 @@ export function titleCase(name: string): string {
     .toLowerCase()
     .replace(/\b[a-z]/g, (c) => c.toUpperCase())
     .replace(/\b(Ii|Iii|Iv|Md|Do|Dds|Dc|Od|Pa|Np|Rn|Ceo|Cfo|Coo)\b/g, (s) => s.toUpperCase());
+}
+
+/**
+ * One row of Step 4's own CSV export — every lead this run touched, not just
+ * the ones that came out sendable. Useful for a human to review what Step 4
+ * actually found (including rejected/unverified addresses) without waiting
+ * on Step 5's stricter filtering.
+ */
+export type ContactExportRow = {
+  organization: string;
+  city: string;
+  state: string;
+  practicePhone: string | null;
+  decisionMakerName: string | null;
+  decisionMakerTitle: string | null;
+  decisionMakerPhone: string | null;
+  email: string | null;
+  emailConfidence: number | null;
+  emailVerifyStatus: string | null;
+  sendable: boolean;
+  website: string | null;
+  linkedin: string | null;
+  webOwnerName: string | null;
+  score: number;
+  tag: string | null;
+};
+
+const CONTACTS_CSV_COLUMNS: { header: string; get: (r: ContactExportRow) => string }[] = [
+  { header: 'Organization', get: (r) => r.organization },
+  { header: 'City', get: (r) => r.city },
+  { header: 'State', get: (r) => r.state },
+  { header: 'Tag', get: (r) => r.tag ?? '' },
+  { header: 'Score', get: (r) => String(r.score) },
+  { header: 'Practice Phone', get: (r) => r.practicePhone ?? '' },
+  { header: 'Decision Maker Name', get: (r) => r.decisionMakerName ?? '' },
+  { header: 'Decision Maker Title', get: (r) => r.decisionMakerTitle ?? '' },
+  { header: 'Decision Maker Phone', get: (r) => r.decisionMakerPhone ?? '' },
+  { header: 'Email', get: (r) => r.email ?? '' },
+  { header: 'Email Confidence', get: (r) => (r.emailConfidence == null ? '' : String(r.emailConfidence)) },
+  { header: 'Email Verify Status', get: (r) => r.emailVerifyStatus ?? '' },
+  { header: 'Sendable', get: (r) => (r.sendable ? 'Yes' : 'No') },
+  { header: 'Website', get: (r) => r.website ?? '' },
+  { header: 'LinkedIn', get: (r) => r.linkedin ?? '' },
+  { header: 'Site-Stated Owner (if different from NPPES)', get: (r) => r.webOwnerName ?? '' },
+];
+
+export function buildContactsCsv(rows: ContactExportRow[]): string {
+  const header = CONTACTS_CSV_COLUMNS.map((c) => csvCell(c.header)).join(',');
+  const body = rows.map((row) => CONTACTS_CSV_COLUMNS.map((c) => csvCell(c.get(row))).join(','));
+  return [header, ...body].join('\r\n') + '\r\n';
 }
