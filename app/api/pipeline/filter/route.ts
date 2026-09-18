@@ -4,6 +4,7 @@ import { resolveDataFile, findDataFileByPrefix, formatBytes } from '../../../../
 import { streamNppesFile, field, normalizeOrgName, normalizePersonName, buildLeadKey, HeaderIndex } from '../../../../lib/nppes';
 import { resolveScope, makeScopeMatcher, describeScope } from '../../../../lib/scope';
 import { zipCounty, usTimezone } from '../../../../lib/geo';
+import { parseTaxonomyFilter, taxonomyFilterIsEmpty, taxonomyMatches } from '../../../../lib/taxonomy';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -109,10 +110,12 @@ export async function POST(req: Request) {
   }
 
   const stateList = statesParam.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean);
-  const taxonomyList = taxonomyParam.split(',').map((t) => t.trim().toUpperCase()).filter(Boolean);
+  const taxonomyFilter = parseTaxonomyFilter(taxonomyParam);
 
   if (stateList.length === 0) return jsonError('At least one target state is required', 400);
-  if (taxonomyList.length === 0) return jsonError('At least one taxonomy code is required', 400);
+  if (taxonomyFilterIsEmpty(taxonomyFilter)) {
+    return jsonError('At least one taxonomy code (or prefix like 207*) is required', 400);
+  }
 
   const scope = resolveScope({
     states: statesParam,
@@ -124,7 +127,6 @@ export async function POST(req: Request) {
   const inScope = makeScopeMatcher(scope);
 
   const states = new Set(stateList);
-  const taxonomyCodes = new Set(taxonomyList);
 
   // Coarse pre-filter: a matching row must contain the quoted state code somewhere on
   // the line, so lines without it can be skipped before the ~330-field split. Other
@@ -189,7 +191,7 @@ export async function POST(req: Request) {
           let matchedTaxonomy = '';
           for (const col of TAXONOMY_COLS) {
             const tax = field(fields, index, col).trim().toUpperCase();
-            if (tax && taxonomyCodes.has(tax)) {
+            if (tax && taxonomyMatches(tax, taxonomyFilter)) {
               matchedTaxonomy = tax;
               break;
             }

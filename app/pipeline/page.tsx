@@ -61,7 +61,7 @@ export default function PipelinePage() {
   const [dataDirs, setDataDirs] = useState<string[]>([]);
   const [selectedFile, setSelectedFile] = useState("");
   const [states, setStates] = useState("UT");
-  const [taxonomy, setTaxonomy] = useState("111N00000X,152W00000X,207Q00000X");
+  const [taxonomy, setTaxonomy] = useState("1223*,207*,208*");
   const [importMode, setImportMode] = useState<"merge" | "reset">("merge");
   const [area, setArea] = useState<Area>(EMPTY_AREA);
 
@@ -429,8 +429,12 @@ export default function PipelinePage() {
                   className="input-base"
                   value={taxonomy}
                   onChange={e => setTaxonomy(e.target.value)}
-                  placeholder="e.g. 111N00000X"
+                  placeholder="e.g. 1223*,207*,208* or 207Q00000X"
                 />
+                <p className={styles.hint} style={{ marginTop: 6 }}>
+                  Use a trailing <code>*</code> for a prefix — <code>1223*</code> is all dentists,
+                  <code>207*</code> and <code>208*</code> cover all MD/DO physician specialties.
+                </p>
               </div>
 
               <div className={styles.formGroup}>
