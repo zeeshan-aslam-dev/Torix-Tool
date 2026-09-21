@@ -11,13 +11,16 @@ type ScoreRequest = {
   hotThreshold?: number;
   verifyThreshold?: number;
   /**
-   * At or above this many locations a lead is treated as a chain and
-   * penalised outright, rather than getting the multi-location bonus.
-   * Exposed here rather than left as a constant in lib/scoring.ts so the
-   * ideal-customer size can be dialled in from the UI, indefinitely, without
-   * a code change.
+   * Inclusive max branch count. Leads with more locations are hard-EXCLUDEd.
+   * Exposed so the ideal-customer size can be dialled from the UI without a
+   * code change. Defaults to SizePolicy.maxBranches (2).
    */
   maxLocations?: number;
+  /**
+   * Inclusive max NPPES providers at the location. Above this is a hard
+   * EXCLUDE. Defaults to SizePolicy.maxProviders (15).
+   */
+  maxProviders?: number;
   states?: string;
   cities?: string;
   zips?: string;
@@ -51,8 +54,11 @@ export async function POST(req: Request) {
 
   const sizePolicy: SizePolicy = {
     ...DEFAULT_SIZE_POLICY,
-    ...(Number.isFinite(body?.maxLocations) && Number(body.maxLocations) > DEFAULT_SIZE_POLICY.idealMin
-      ? { chainCutoff: Number(body.maxLocations) }
+    ...(Number.isFinite(body?.maxLocations) && Number(body.maxLocations) >= 1
+      ? { maxBranches: Number(body.maxLocations) }
+      : {}),
+    ...(Number.isFinite(body?.maxProviders) && Number(body.maxProviders) >= 1
+      ? { maxProviders: Number(body.maxProviders) }
       : {}),
   };
 
@@ -83,7 +89,8 @@ export async function POST(req: Request) {
         send({
           type: 'log',
           message:
-            `Scoring ${total.toLocaleString()} leads (HOT >= ${thresholds.hot}, VERIFY >= ${thresholds.verify}) ` +
+            `Scoring ${total.toLocaleString()} leads (HOT >= ${thresholds.hot}, VERIFY >= ${thresholds.verify}, ` +
+            `max ${sizePolicy.maxBranches} branches, max ${sizePolicy.maxProviders} providers) ` +
             `against ${blocklistSize()} blocklisted health systems...`,
         });
 

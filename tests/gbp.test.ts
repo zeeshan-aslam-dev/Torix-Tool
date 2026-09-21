@@ -76,7 +76,7 @@ check('an absent status is not a closure', placeIsClosed(''), false);
 // this is the only signal that removes it.
 const strong = {
   organization: 'MCKAY FAMILY PRACTICE',
-  entityType: '2', n_locations_detected: 3, n_providers_at_location: 8,
+  entityType: '2', n_locations_detected: 2, n_providers_at_location: 8,
   authorizedOfficialTitle: 'OWNER', authorizedOfficialName: 'Jenny Mckay',
   phone: '8012102445', lastUpdateDate: new Date(),
 };

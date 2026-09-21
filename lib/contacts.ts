@@ -11,6 +11,7 @@
  */
 
 import { csvCell } from './instantly';
+import { normalizeOrgName } from './nppes';
 
 export type EmailCandidate = {
   email: string;
@@ -247,8 +248,15 @@ export function titleCase(name: string): string {
  */
 export type ContactExportRow = {
   organization: string;
+  /** NPPES National Provider Identifier for this practice location. */
+  npi: string | null;
   city: string;
   state: string;
+  zip: string;
+  /** Distinct practice locations known for this org (from Step 1). */
+  nLocations: number;
+  /** NPPES providers sharing this org + address (from Step 1). */
+  nProviders: number;
   practicePhone: string | null;
   decisionMakerName: string | null;
   decisionMakerTitle: string | null;
@@ -262,11 +270,87 @@ export type ContactExportRow = {
   webOwnerName: string | null;
   score: number;
   tag: string | null;
+  /** Filled by finalizeContactsCsvRows — how many branches this org kept. */
+  branchCount?: number;
 };
+
+/** Orgs with more locations than this are treated as chains and dropped from the CSV. */
+export const CONTACTS_CSV_MAX_BRANCHES = 2;
+/** Sites with more NPPES providers than this are dropped from the CSV. */
+export const CONTACTS_CSV_MAX_PROVIDERS = 15;
+
+/** Last 10 digits of a US phone, or '' if too short to compare. */
+export function digitsPhone(phone: string | null | undefined): string {
+  const d = (phone ?? '').replace(/\D/g, '');
+  return d.length >= 10 ? d.slice(-10) : d;
+}
+
+export function phonesAreSame(a: string | null | undefined, b: string | null | undefined): boolean {
+  const da = digitsPhone(a);
+  const db = digitsPhone(b);
+  return da.length >= 10 && da === db;
+}
+
+/**
+ * Step 4 CSV shaping:
+ * 1. Drop rows where practice phone and decision-maker phone are the same number
+ *    (no separate direct line).
+ * 2. Keep only orgs with 1–2 branches (max 2); drop larger chains.
+ * 3. Keep only sites with ≤15 NPPES providers at the location.
+ * 4. One row per org — the highest-scoring location as the main office.
+ * 5. Stamp branchCount for the CSV column.
+ */
+export function finalizeContactsCsvRows(rows: ContactExportRow[]): ContactExportRow[] {
+  const withDistinctPhones = rows.filter((r) => {
+    // Need both numbers, and they must differ — otherwise there is no separate
+    // direct line for the decision maker.
+    if (!r.practicePhone || !r.decisionMakerPhone) return false;
+    return !phonesAreSame(r.practicePhone, r.decisionMakerPhone);
+  });
+
+  const byOrg = new Map<string, ContactExportRow[]>();
+  for (const row of withDistinctPhones) {
+    if ((row.nProviders ?? 0) > CONTACTS_CSV_MAX_PROVIDERS) continue;
+    const key = normalizeOrgName(row.organization);
+    const list = byOrg.get(key);
+    if (list) list.push(row);
+    else byOrg.set(key, [row]);
+  }
+
+  const out: ContactExportRow[] = [];
+  for (const group of byOrg.values()) {
+    const fromFile = new Set(
+      group.map((r) => `${(r.city || '').toUpperCase()}|${r.zip || ''}|${(r.state || '').toUpperCase()}`)
+    ).size;
+    const branchCount = Math.max(
+      fromFile,
+      ...group.map((r) => r.nLocations || 0),
+      1
+    );
+    if (branchCount > CONTACTS_CSV_MAX_BRANCHES) continue;
+
+    const main = group.reduce((best, row) => {
+      if (row.score !== best.score) return row.score > best.score ? row : best;
+      // Stable tie-break: earlier city name, then zip.
+      const a = `${best.city}|${best.zip}`;
+      const b = `${row.city}|${row.zip}`;
+      return b < a ? row : best;
+    });
+
+    out.push({ ...main, branchCount });
+  }
+
+  out.sort((a, b) => b.score - a.score || a.organization.localeCompare(b.organization));
+  return out;
+}
 
 const CONTACTS_CSV_COLUMNS: { header: string; get: (r: ContactExportRow) => string }[] = [
   { header: 'Organization', get: (r) => r.organization },
+  { header: 'NPI', get: (r) => r.npi ?? '' },
+  { header: 'Branches', get: (r) => String(r.branchCount ?? r.nLocations ?? '') },
+  { header: 'Providers', get: (r) => String(r.nProviders ?? '') },
   { header: 'City', get: (r) => r.city },
+  { header: 'ZIP', get: (r) => r.zip },
   { header: 'State', get: (r) => r.state },
   { header: 'Tag', get: (r) => r.tag ?? '' },
   { header: 'Score', get: (r) => String(r.score) },
@@ -284,7 +368,195 @@ const CONTACTS_CSV_COLUMNS: { header: string; get: (r: ContactExportRow) => stri
 ];
 
 export function buildContactsCsv(rows: ContactExportRow[]): string {
+  const finalized = finalizeContactsCsvRows(rows);
   const header = CONTACTS_CSV_COLUMNS.map((c) => csvCell(c.header)).join(',');
-  const body = rows.map((row) => CONTACTS_CSV_COLUMNS.map((c) => csvCell(c.get(row))).join(','));
+  const body = finalized.map((row) => CONTACTS_CSV_COLUMNS.map((c) => csvCell(c.get(row))).join(','));
   return [header, ...body].join('\r\n') + '\r\n';
+}
+
+// ---------------------------------------------------------------------------
+// Upload-and-filter an existing contacts CSV
+// ---------------------------------------------------------------------------
+
+/** One parsed CSV row as header → cell. */
+export type CsvRecord = Record<string, string>;
+
+export type PracticeSize = {
+  npi: string | null;
+  branches: number;
+  providers: number;
+};
+
+/** RFC-style CSV line split that respects quoted commas. */
+export function splitCsvLine(line: string): string[] {
+  const out: string[] = [];
+  let cur = '';
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') {
+          cur += '"';
+          i++;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        cur += ch;
+      }
+    } else if (ch === '"') {
+      inQuotes = true;
+    } else if (ch === ',') {
+      out.push(cur);
+      cur = '';
+    } else {
+      cur += ch;
+    }
+  }
+  out.push(cur);
+  return out;
+}
+
+/** Parses a whole CSV text into header names + row objects. */
+export function parseContactsCsvText(text: string): { headers: string[]; rows: CsvRecord[] } {
+  const lines = text
+    .replace(/^\uFEFF/, '')
+    .split(/\r?\n/)
+    .map((l) => l.trimEnd())
+    .filter((l) => l.length > 0);
+
+  if (lines.length === 0) return { headers: [], rows: [] };
+
+  const headers = splitCsvLine(lines[0]).map((h) => h.trim());
+  const rows: CsvRecord[] = [];
+  for (const line of lines.slice(1)) {
+    const cells = splitCsvLine(line);
+    const row: CsvRecord = {};
+    for (let i = 0; i < headers.length; i++) {
+      row[headers[i]] = (cells[i] ?? '').trim();
+    }
+    rows.push(row);
+  }
+  return { headers, rows };
+}
+
+function cell(row: CsvRecord, ...names: string[]): string {
+  for (const name of names) {
+    const exact = row[name];
+    if (exact != null && exact !== '') return exact;
+  }
+  const lower = Object.fromEntries(Object.entries(row).map(([k, v]) => [k.toLowerCase(), v]));
+  for (const name of names) {
+    const v = lower[name.toLowerCase()];
+    if (v != null && v !== '') return v;
+  }
+  return '';
+}
+
+function parsePositiveInt(raw: string): number | null {
+  const n = Number(String(raw).replace(/,/g, '').trim());
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : null;
+}
+
+/** Pulls size hints already present on an uploaded row, when the columns exist. */
+export function sizeFromCsvRow(row: CsvRecord): Partial<PracticeSize> {
+  const npi = cell(row, 'NPI', 'NPPES Number', 'NPPES', 'npi') || null;
+  const branches = parsePositiveInt(cell(row, 'Branches', 'Branch Count', 'Locations', 'n_locations_detected'));
+  const providers = parsePositiveInt(cell(row, 'Providers', 'Provider Count', 'n_providers_at_location'));
+  return {
+    npi: npi || null,
+    ...(branches != null ? { branches } : {}),
+    ...(providers != null ? { providers } : {}),
+  };
+}
+
+export function csvRowMatchKey(row: CsvRecord): { npi: string | null; orgKey: string; city: string; state: string; zip: string } {
+  const npi = cell(row, 'NPI', 'NPPES Number', 'NPPES', 'npi') || null;
+  const org = cell(row, 'Organization', 'Company Name', 'Company');
+  return {
+    npi: npi && /^\d{10}$/.test(npi) ? npi : npi || null,
+    orgKey: normalizeOrgName(org),
+    city: cell(row, 'City').toUpperCase(),
+    state: cell(row, 'State').toUpperCase(),
+    zip: cell(row, 'ZIP', 'Zip', 'Postal Code').slice(0, 5),
+  };
+}
+
+/**
+ * Filters an uploaded contacts CSV to practices within the size caps.
+ *
+ * `resolveSize` is supplied by the API (DB lookup). When the CSV already has
+ * Branches/Providers columns those win as a fallback if the lookup misses.
+ * Rows that cannot be sized are dropped — better than letting oversized orgs
+ * through an unverified path.
+ */
+export function filterUploadedContactsCsv(
+  csvText: string,
+  resolveSize: (row: CsvRecord) => PracticeSize | null,
+  opts: { maxBranches?: number; maxProviders?: number } = {}
+): {
+  csv: string;
+  kept: number;
+  droppedOversize: number;
+  unmatched: number;
+  total: number;
+} {
+  const maxBranches = opts.maxBranches ?? CONTACTS_CSV_MAX_BRANCHES;
+  const maxProviders = opts.maxProviders ?? CONTACTS_CSV_MAX_PROVIDERS;
+  const { headers, rows } = parseContactsCsvText(csvText);
+
+  if (!headers.length) {
+    return { csv: '', kept: 0, droppedOversize: 0, unmatched: 0, total: 0 };
+  }
+
+  const ensure = (name: string) => {
+    if (!headers.some((h) => h.toLowerCase() === name.toLowerCase())) headers.push(name);
+  };
+  ensure('NPI');
+  ensure('Branches');
+  ensure('Providers');
+
+  const keptRows: CsvRecord[] = [];
+  let droppedOversize = 0;
+  let unmatched = 0;
+
+  for (const row of rows) {
+    const fromCsv = sizeFromCsvRow(row);
+    const fromDb = resolveSize(row);
+    const branches = fromDb?.branches ?? fromCsv.branches;
+    const providers = fromDb?.providers ?? fromCsv.providers;
+    const npi = fromDb?.npi ?? fromCsv.npi ?? '';
+
+    if (branches == null || providers == null) {
+      unmatched++;
+      continue;
+    }
+    if (branches > maxBranches || providers > maxProviders) {
+      droppedOversize++;
+      continue;
+    }
+
+    const next: CsvRecord = { ...row };
+    // Write into the canonical column names we ensured above.
+    const npiHeader = headers.find((h) => h.toLowerCase() === 'npi') ?? 'NPI';
+    const branchesHeader = headers.find((h) => h.toLowerCase() === 'branches') ?? 'Branches';
+    const providersHeader = headers.find((h) => h.toLowerCase() === 'providers') ?? 'Providers';
+    next[npiHeader] = npi || next[npiHeader] || '';
+    next[branchesHeader] = String(branches);
+    next[providersHeader] = String(providers);
+    keptRows.push(next);
+  }
+
+  const headerLine = headers.map((h) => csvCell(h)).join(',');
+  const body = keptRows.map((row) => headers.map((h) => csvCell(row[h] ?? '')).join(','));
+  const csv = [headerLine, ...body].join('\r\n') + '\r\n';
+
+  return {
+    csv,
+    kept: keptRows.length,
+    droppedOversize,
+    unmatched,
+    total: rows.length,
+  };
 }

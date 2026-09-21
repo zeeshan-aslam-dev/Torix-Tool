@@ -24,7 +24,7 @@ check('does not fire on a shared word', matchBlocklist('MERCY STREET DENTAL'), n
 // --- blocklist forces EXCLUDE regardless of score -------------------------
 const wouldBeHot = {
   organization: 'IHC HEALTH SERVICES, INC',
-  entityType: '2', n_locations_detected: 3, n_providers_at_location: 8,
+  entityType: '2', n_locations_detected: 2, n_providers_at_location: 8,
   authorizedOfficialTitle: 'OWNER', authorizedOfficialName: 'Someone',
   phone: '8015551234', lastUpdateDate: new Date(),
 };

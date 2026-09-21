@@ -10,9 +10,9 @@ function check(name: string, actual: unknown, expected: unknown) {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${ok ? '' : `  expected ${expected}, got ${actual}`}`);
 }
 
-// 1. Ideal buyer: 3-location practice, owner named, fresh record
+// 1. Ideal buyer: 2-location practice, owner named, fresh record
 const ideal = scoreLead({
-  entityType: '2', n_locations_detected: 3, n_providers_at_location: 6,
+  entityType: '2', n_locations_detected: 2, n_providers_at_location: 6,
   authorizedOfficialTitle: 'OWNER', authorizedOfficialName: 'JANE DOE',
   phone: '8015551234', lastUpdateDate: yearsAgo(1),
 }, DEFAULT_THRESHOLDS, NOW);
@@ -42,7 +42,7 @@ check('sole proprietor scores 0 too, not just lower', sole.score, 0);
 // blocklist does — this is what makes the online independence check an
 // actual gate instead of a handful of extra scoring points.
 const acquired = scoreLead({
-  entityType: '2', n_locations_detected: 3, n_providers_at_location: 6,
+  entityType: '2', n_locations_detected: 2, n_providers_at_location: 6,
   authorizedOfficialTitle: 'OWNER', authorizedOfficialName: 'JANE DOE',
   phone: '8015551234', lastUpdateDate: yearsAgo(1), possibleAcquisition: true,
 }, DEFAULT_THRESHOLDS, NOW);
@@ -50,17 +50,45 @@ check('a Step-3-discovered acquisition excludes an otherwise-ideal practice', ac
 check('acquisition-excluded score is 0', acquired.score, 0);
 check('acquisition flag carries through to the result', acquired.possibleAcquisition, true);
 
-// 4. Hospital chain — has an in-house team, should be pushed down
+// 4. Hospital chain — hard size cap excludes before soft scoring
 const chain = scoreLead({
   entityType: '2', n_locations_detected: 88, n_providers_at_location: 2,
   authorizedOfficialTitle: 'CEO', authorizedOfficialName: 'BIG BOSS',
   phone: '8015559999', lastUpdateDate: yearsAgo(1),
 }, DEFAULT_THRESHOLDS, NOW);
-check('88-location chain is not HOT', chain.tag !== 'HOT', true);
+check('88-location chain is EXCLUDE', chain.tag, 'EXCLUDE');
+check('88-location chain scores 0', chain.score, 0);
+check('88-location reason names the branch cap', chain.reason.includes('max of 2 branches'), true);
+
+// 4b. Three branches is already over the hard max of 2
+const threeBranches = scoreLead({
+  entityType: '2', n_locations_detected: 3, n_providers_at_location: 6,
+  authorizedOfficialTitle: 'OWNER', authorizedOfficialName: 'JANE DOE',
+  phone: '8015551234', lastUpdateDate: yearsAgo(1),
+}, DEFAULT_THRESHOLDS, NOW);
+check('3-location practice is EXCLUDE under max 2 branches', threeBranches.tag, 'EXCLUDE');
+check('3-location score is 0', threeBranches.score, 0);
+
+// 4c. Too many providers at one site
+const tooManyProviders = scoreLead({
+  entityType: '2', n_locations_detected: 1, n_providers_at_location: 16,
+  authorizedOfficialTitle: 'OWNER', authorizedOfficialName: 'JANE DOE',
+  phone: '8015551234', lastUpdateDate: yearsAgo(1),
+}, DEFAULT_THRESHOLDS, NOW);
+check('16-provider site is EXCLUDE under max 15', tooManyProviders.tag, 'EXCLUDE');
+check('16-provider reason names the provider cap', tooManyProviders.reason.includes('max of 15'), true);
+
+const atProviderCap = scoreLead({
+  entityType: '2', n_locations_detected: 1, n_providers_at_location: 15,
+  authorizedOfficialTitle: 'OWNER', authorizedOfficialName: 'JANE DOE',
+  phone: '8015551234', lastUpdateDate: yearsAgo(1),
+}, DEFAULT_THRESHOLDS, NOW);
+check('15 providers is still allowed', atProviderCap.tag !== 'EXCLUDE' || atProviderCap.score > 0, true);
+check('15-provider lead is not hard-excluded', atProviderCap.reason.includes('max of 15'), false);
 
 // 5. Subsidiary — decisions happen at HQ
 const sub = scoreLead({
-  entityType: '2', n_locations_detected: 3, n_providers_at_location: 4,
+  entityType: '2', n_locations_detected: 2, n_providers_at_location: 4,
   authorizedOfficialTitle: 'OWNER', authorizedOfficialName: 'X',
   phone: '1', lastUpdateDate: yearsAgo(1),
   isOrganizationSubpart: 'Y', parentOrganizationLbn: 'BIG HEALTH INC',
@@ -68,11 +96,10 @@ const sub = scoreLead({
 check('subsidiary flagged as possible acquisition', sub.possibleAcquisition, true);
 check('subsidiary scores below the same practice standalone', sub.score < ideal.score, true);
 
-// 6. Score is clamped and reason is populated — an org (not an individual, so
-// the entity-type gate above does not just short-circuit this to zero for
-// the wrong reason), with every possible negative signal stacked on it.
+// 6. Score is clamped and reason is populated — an org that clears the hard
+// size caps but stacks every soft negative signal.
 const extreme = scoreLead({
-  entityType: '2', n_locations_detected: 88, n_providers_at_location: 1,
+  entityType: '2', n_locations_detected: 1, n_providers_at_location: 1,
   isOrganizationSubpart: 'Y', parentOrganizationLbn: 'BIG HEALTH INC',
   lastUpdateDate: yearsAgo(30), phone: null,
 }, DEFAULT_THRESHOLDS, NOW);
@@ -86,22 +113,24 @@ const custom = scoreLead({
 }, { hot: 10, verify: 5 }, NOW);
 check('custom low threshold promotes to HOT', custom.tag, 'HOT');
 
-// 8. The size cutoff is data, not a hardcoded number — this is the whole point
-// of exposing it as `maxLocations` in Step 2's UI rather than only in the source.
-const chainSizedInput = {
-  entityType: '2' as const, n_locations_detected: 15, n_providers_at_location: 1,
+// 8. Hard caps are data — raising maxBranches lets a 3-location practice through.
+const threeLocInput = {
+  entityType: '2' as const, n_locations_detected: 3, n_providers_at_location: 6,
   authorizedOfficialTitle: 'OWNER', authorizedOfficialName: 'JANE DOE',
   phone: '8015551234', lastUpdateDate: yearsAgo(1),
 };
-const withDefaultPolicy = scoreLead(chainSizedInput, DEFAULT_THRESHOLDS, NOW);
-check('15 locations gets the "likely has resources" band under the default policy (cutoff 21)',
-  withDefaultPolicy.reason.includes('likely has internal resources'), true);
+const withRaisedBranchCap = scoreLead(
+  threeLocInput, DEFAULT_THRESHOLDS, NOW, undefined,
+  { ...DEFAULT_SIZE_POLICY, maxBranches: 3 }
+);
+check('raising maxBranches to 3 lets a 3-location practice score', withRaisedBranchCap.tag, 'HOT');
 
-const tighterPolicy = scoreLead(chainSizedInput, DEFAULT_THRESHOLDS, NOW, undefined, { ...DEFAULT_SIZE_POLICY, chainCutoff: 10 });
-check('the same 15-location lead is treated as a large chain once the cutoff is lowered to 10',
-  tighterPolicy.reason.includes('large chain'), true);
-check('lowering the cutoff scores it lower than the default policy did',
-  tighterPolicy.score < withDefaultPolicy.score, true);
+const withRaisedProviderCap = scoreLead(
+  { ...threeLocInput, n_locations_detected: 1, n_providers_at_location: 20 },
+  DEFAULT_THRESHOLDS, NOW, undefined,
+  { ...DEFAULT_SIZE_POLICY, maxProviders: 20 }
+);
+check('raising maxProviders to 20 lets a 20-provider site score', withRaisedProviderCap.tag, 'HOT');
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

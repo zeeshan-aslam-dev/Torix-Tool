@@ -33,6 +33,8 @@ export type SendableLead = {
   webOwnerName: string | null;
   /** The phone number on the business's own Google Business Profile listing — see Step 3. Often kept fresher than the NPPES-registered number, since owners maintain it for customers. */
   gbpPhone: string | null;
+  /** NPPES National Provider Identifier for this practice. */
+  npi: string | null;
 };
 
 /**
@@ -61,6 +63,7 @@ const CSV_COLUMNS: { header: string; get: (lead: SendableLead) => string }[] = [
   // the "Title" column above. This is only here so whoever works the list can
   // see the site disagreed with NPPES without opening the CRM to find out.
   { header: 'Site-Stated Owner (if different from NPPES)', get: (l) => l.webOwnerName ?? '' },
+  { header: 'NPI', get: (l) => l.npi ?? '' },
 ];
 
 export function csvCell(value: string): string {

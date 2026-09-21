@@ -303,6 +303,24 @@
   background: rgba(59, 130, 246, 0.08);
 }
 
+.csvUpload {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 20px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.csvUpload .fileInput {
+  display: block;
+  margin-top: 12px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
 .modeChoice {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));

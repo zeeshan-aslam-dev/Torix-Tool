@@ -18,33 +18,33 @@ const lead = (over: Partial<SendableLead>): SendableLead => ({
   leadId: 1, leadKey: 'MCKAY FAMILY PRACTICE|123 MAIN ST|WEST JORDAN|UT|84088', email: 'info@clinic.com', firstName: 'Jenny', lastName: 'Mckay',
   companyName: 'MCKAY FAMILY PRACTICE', phone: '8012102445', title: 'Owner',
   website: 'https://clinic.com', linkedin: null, city: 'WEST JORDAN', state: 'UT',
-  county: null, timezone: null, alternatePhone: null, webOwnerName: null, gbpPhone: null, score: 85, ...over,
+  county: null, timezone: null, alternatePhone: null, webOwnerName: null, gbpPhone: null, npi: null, score: 85, ...over,
 });
 
 const csv = buildCsv([lead({})]);
 const lines = csv.trim().split('\r\n');
 check('header row', lines[0],
-  '"Email","First Name","Last Name","Company Name","Phone","Title","Website","City","State","Lead Score","LinkedIn","Time Zone","County","Alternate Phone","Google Business Phone","Site-Stated Owner (if different from NPPES)"');
+  '"Email","First Name","Last Name","Company Name","Phone","Title","Website","City","State","Lead Score","LinkedIn","Time Zone","County","Alternate Phone","Google Business Phone","Site-Stated Owner (if different from NPPES)","NPI"');
 check('data row', lines[1],
-  '"info@clinic.com","Jenny","Mckay","MCKAY FAMILY PRACTICE","8012102445","Owner","https://clinic.com","WEST JORDAN","UT","85","","","","","",""');
+  '"info@clinic.com","Jenny","Mckay","MCKAY FAMILY PRACTICE","8012102445","Owner","https://clinic.com","WEST JORDAN","UT","85","","","","","","",""');
 
 // LinkedIn is appended, not inserted — a re-import must not shift every column
 // after it into the wrong field just because this one is now populated.
 const withLinkedin = buildCsv([lead({ linkedin: 'https://www.linkedin.com/company/mckay-family-practice' })]);
 check('LinkedIn column sits where it was added, ahead of the newer columns',
   withLinkedin.trim().split('\r\n')[1],
-  '"info@clinic.com","Jenny","Mckay","MCKAY FAMILY PRACTICE","8012102445","Owner","https://clinic.com","WEST JORDAN","UT","85","https://www.linkedin.com/company/mckay-family-practice","","","","",""');
+  '"info@clinic.com","Jenny","Mckay","MCKAY FAMILY PRACTICE","8012102445","Owner","https://clinic.com","WEST JORDAN","UT","85","https://www.linkedin.com/company/mckay-family-practice","","","","","",""');
 
 // Time zone, county, alternate phone, a GBP phone and a site-stated owner name
 // all land in their own columns, appended after LinkedIn for the same reason
 // LinkedIn was appended after the original columns — never reorder what is
-// already there.
+// already there. NPI is newest and therefore last.
 const withNewFields = buildCsv([lead({
-  county: 'Utah County', timezone: 'Mountain', alternatePhone: '8015550199', gbpPhone: '8015550188', webOwnerName: 'Jenny McKay',
+  county: 'Utah County', timezone: 'Mountain', alternatePhone: '8015550199', gbpPhone: '8015550188', webOwnerName: 'Jenny McKay', npi: '1679676724',
 })]);
-check('the geography, alternate-phone, GBP-phone and owner-flag columns are last, in that order',
+check('the geography, alternate-phone, GBP-phone, owner-flag and NPI columns are last, in that order',
   withNewFields.trim().split('\r\n')[1],
-  '"info@clinic.com","Jenny","Mckay","MCKAY FAMILY PRACTICE","8012102445","Owner","https://clinic.com","WEST JORDAN","UT","85","","Mountain","Utah County","8015550199","8015550188","Jenny McKay"');
+  '"info@clinic.com","Jenny","Mckay","MCKAY FAMILY PRACTICE","8012102445","Owner","https://clinic.com","WEST JORDAN","UT","85","","Mountain","Utah County","8015550199","8015550188","Jenny McKay","1679676724"');
 check('CRLF line endings', csv.includes('\r\n'), true);
 
 // --- injection / quoting --------------------------------------------------

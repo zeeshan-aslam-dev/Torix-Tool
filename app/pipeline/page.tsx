@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import styles from "./page.module.css";
-import { FolderOpen, Play, CheckCircle2, RefreshCw, FileText, Flame, Globe, Users, Send, Download } from "lucide-react";
+import { FolderOpen, Play, CheckCircle2, RefreshCw, FileText, Flame, Globe, Users, Send, Download, Upload } from "lucide-react";
 import classNames from "classnames";
 import StateSelect from "../components/StateSelect";
 import AreaFilter, { Area, EMPTY_AREA, areaToRequest } from "../components/AreaFilter";
@@ -87,10 +87,14 @@ export default function PipelinePage() {
   const [resend, setResend] = useState(false);
   const [csvReady, setCsvReady] = useState<{ csv: string; filename: string; rows: number } | null>(null);
   const [contactsCsvReady, setContactsCsvReady] = useState<{ csv: string; filename: string; rows: number } | null>(null);
+  const [filterCsvFile, setFilterCsvFile] = useState<File | null>(null);
+  const [filterCsvReady, setFilterCsvReady] = useState<{ csv: string; filename: string; rows: number } | null>(null);
+  const [filterCsvBusy, setFilterCsvBusy] = useState(false);
 
   const [hotThreshold, setHotThreshold] = useState(55);
   const [verifyThreshold, setVerifyThreshold] = useState(30);
-  const [maxLocations, setMaxLocations] = useState(21);
+  const [maxLocations, setMaxLocations] = useState(2);
+  const [maxProviders, setMaxProviders] = useState(15);
   const [counts, setCounts] = useState<ScoreCounts | null>(null);
 
   const addLog = (msg: string) =>
@@ -209,12 +213,12 @@ export default function PipelinePage() {
   };
 
   const runScore = async () => {
-    addLog(`Scoring leads with thresholds HOT >= ${hotThreshold}, VERIFY >= ${verifyThreshold}, max locations ${maxLocations}...`);
+    addLog(`Scoring leads with thresholds HOT >= ${hotThreshold}, VERIFY >= ${verifyThreshold}, max ${maxLocations} branches, max ${maxProviders} providers...`);
     setCounts(null);
 
     const ok = await runStream(
       "/api/pipeline/score",
-      { hotThreshold, verifyThreshold, maxLocations, states, ...areaToRequest(area) },
+      { hotThreshold, verifyThreshold, maxLocations, maxProviders, states, ...areaToRequest(area) },
       event => {
         if (event.type === "log" || event.type === "done") {
           addLog(event.message ?? "");
@@ -342,6 +346,43 @@ export default function PipelinePage() {
 
   const downloadContactsCsv = () => {
     if (contactsCsvReady) downloadCsvFile(contactsCsvReady);
+  };
+
+  const downloadFilteredCsv = () => {
+    if (filterCsvReady) downloadCsvFile(filterCsvReady);
+  };
+
+  const runFilterUploadedCsv = async () => {
+    if (!filterCsvFile) {
+      addLog("Pick a contacts CSV to filter first.");
+      return;
+    }
+
+    setFilterCsvBusy(true);
+    setFilterCsvReady(null);
+    addLog(`Filtering ${filterCsvFile.name} to ≤2 branches and ≤15 providers...`);
+
+    try {
+      const form = new FormData();
+      form.append("file", filterCsvFile);
+      form.append("maxBranches", "2");
+      form.append("maxProviders", "15");
+
+      const res = await fetch("/api/pipeline/filter-csv", { method: "POST", body: form });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? res.statusText);
+
+      setFilterCsvReady({
+        csv: data.csv,
+        filename: data.filename,
+        rows: data.kept ?? 0,
+      });
+      addLog(data.message ?? `Kept ${data.kept} rows.`);
+    } catch (e) {
+      addLog(`Error: ${errorMessage(e)}`);
+    } finally {
+      setFilterCsvBusy(false);
+    }
   };
 
   const toggleSendTag = (tag: string) =>
@@ -586,14 +627,26 @@ export default function PipelinePage() {
                   />
                 </div>
                 <div className={styles.formGroup}>
-                  <label className={styles.label}>Max locations (chain cutoff)</label>
+                  <label className={styles.label}>Max branches</label>
                   <input
                     type="number"
                     className="input-base"
-                    min={2}
+                    min={1}
                     max={9999}
                     value={maxLocations}
                     onChange={e => setMaxLocations(Number(e.target.value))}
+                    disabled={isProcessing}
+                  />
+                </div>
+                <div className={styles.formGroup}>
+                  <label className={styles.label}>Max providers at location</label>
+                  <input
+                    type="number"
+                    className="input-base"
+                    min={1}
+                    max={9999}
+                    value={maxProviders}
+                    onChange={e => setMaxProviders(Number(e.target.value))}
                     disabled={isProcessing}
                   />
                 </div>
@@ -859,12 +912,56 @@ export default function PipelinePage() {
                   <div>
                     <strong>{contactsCsvReady.filename}</strong>
                     <div className={styles.hint}>
-                      {contactsCsvReady.rows.toLocaleString()} leads processed — every one this run touched,
-                      not just the sendable ones
+                      Filtered CSV: unique orgs with ≤2 branches and ≤15 providers,
+                      distinct practice vs decision-maker phone, main office only —
+                      includes NPI, Branches and Providers columns
                     </div>
                   </div>
                   <button className="btn btn-primary" onClick={downloadContactsCsv}>
                     <Download size={16} /> Download CSV
+                  </button>
+                </div>
+              )}
+
+              <div className={styles.csvUpload}>
+                <div>
+                  <strong>Filter an existing contacts CSV</strong>
+                  <div className={styles.hint}>
+                    Upload a previously downloaded Step 4 CSV. Rows are matched to the
+                    database by NPI or organization, then kept only when they have
+                    ≤2 branches and ≤15 providers. Adds NPI / Branches / Providers
+                    columns when missing.
+                  </div>
+                  <input
+                    type="file"
+                    accept=".csv,text/csv"
+                    className={styles.fileInput}
+                    disabled={isProcessing || filterCsvBusy}
+                    onChange={e => {
+                      setFilterCsvFile(e.target.files?.[0] ?? null);
+                      setFilterCsvReady(null);
+                    }}
+                  />
+                </div>
+                <button
+                  className="btn"
+                  onClick={runFilterUploadedCsv}
+                  disabled={isProcessing || filterCsvBusy || !filterCsvFile}
+                >
+                  {filterCsvBusy ? 'Filtering...' : <><Upload size={16} /> Filter CSV</>}
+                </button>
+              </div>
+
+              {filterCsvReady && (
+                <div className={styles.csvReady}>
+                  <div>
+                    <strong>{filterCsvReady.filename}</strong>
+                    <div className={styles.hint}>
+                      {filterCsvReady.rows.toLocaleString()} rows kept after size filter
+                    </div>
+                  </div>
+                  <button className="btn btn-primary" onClick={downloadFilteredCsv}>
+                    <Download size={16} /> Download Filtered CSV
                   </button>
                 </div>
               )}

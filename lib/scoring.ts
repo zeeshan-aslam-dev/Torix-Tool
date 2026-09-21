@@ -47,22 +47,31 @@ export type Thresholds = {
 };
 
 /**
- * The location-count boundaries that separate "needs a web presence" from
- * "already has in-house marketing." Kept as data the caller can override
- * rather than numbers buried in the function body, so the ideal-customer size
- * can be dialled in over time without a code change — Step 2 exposes
- * `maxLocations` in the UI as exactly this cutoff.
+ * Size gates for the ideal buyer: small enough to need outside help, large
+ * enough to have a budget. Soft bands still influence the score; the hard
+ * caps exclude outright. Step 2 exposes `maxLocations` / `maxProviders` in
+ * the UI so these can be dialled without a code change.
  */
 export type SizePolicy = {
   /** At or above this many locations, the multi-location bonus starts. */
   idealMin: number;
   /** At or above this many locations, the bonus shrinks — likely has internal resources. */
   midMin: number;
-  /** At or above this many locations, treated as a chain and penalised outright. */
+  /** At or above this many locations, treated as a chain and penalised (soft). */
   chainCutoff: number;
+  /** Inclusive max locations kept — anything above is a hard EXCLUDE. */
+  maxBranches: number;
+  /** Inclusive max NPPES providers at the location — anything above is a hard EXCLUDE. */
+  maxProviders: number;
 };
 
-export const DEFAULT_SIZE_POLICY: SizePolicy = { idealMin: 2, midMin: 11, chainCutoff: 21 };
+export const DEFAULT_SIZE_POLICY: SizePolicy = {
+  idealMin: 2,
+  midMin: 11,
+  chainCutoff: 21,
+  maxBranches: 2,
+  maxProviders: 15,
+};
 
 export const DEFAULT_THRESHOLDS: Thresholds = { hot: 55, verify: 30 };
 
@@ -141,6 +150,30 @@ export function scoreLead(
     };
   }
 
+  const locations = lead.n_locations_detected ?? 0;
+  const providers = lead.n_providers_at_location ?? 0;
+
+  // Hard size caps — applied before soft scoring so large chains never burn
+  // Step 3 credits and never land in HOT just because the rest of the record
+  // looks strong. Counts come from NPPES (distinct addresses for the same org,
+  // and providers sharing that org+address), not from Serper.
+  if (locations > sizePolicy.maxBranches) {
+    return {
+      score: 0,
+      tag: 'EXCLUDE',
+      reason: `${locations} locations — above the max of ${sizePolicy.maxBranches} branches`,
+      possibleAcquisition: false,
+    };
+  }
+  if (providers > sizePolicy.maxProviders) {
+    return {
+      score: 0,
+      tag: 'EXCLUDE',
+      reason: `${providers} providers at this location — above the max of ${sizePolicy.maxProviders}`,
+      possibleAcquisition: false,
+    };
+  }
+
   let score = 0;
   const reasons: string[] = [];
 
@@ -153,8 +186,6 @@ export function scoreLead(
   const soleProprietor = (lead.isSoleProprietor || '').toUpperCase() === 'Y';
   const subpart = (lead.isOrganizationSubpart || '').toUpperCase() === 'Y';
   const parent = (lead.parentOrganizationLbn || '').trim();
-  const locations = lead.n_locations_detected ?? 0;
-  const providers = lead.n_providers_at_location ?? 0;
   const title = (lead.authorizedOfficialTitle || '').toUpperCase();
 
   // --- Business type -------------------------------------------------------

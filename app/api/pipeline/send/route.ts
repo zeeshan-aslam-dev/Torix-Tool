@@ -140,7 +140,7 @@ export async function POST(req: Request) {
           take: limit,
           select: {
             id: true, leadKey: true, organization: true, city: true, state: true, score: true,
-            phone: true, website_found: true, linkedinUrl: true,
+            phone: true, website_found: true, linkedinUrl: true, npi: true,
             county: true, timezone: true, alternateOfficialPhone: true, webOwnerName: true, gbpPhone: true,
             contact: {
               select: { decisionMakerName: true, decisionMakerTitle: true, decisionMakerEmail: true, decisionMakerPhone: true },
@@ -212,6 +212,7 @@ export async function POST(req: Request) {
             score: lead.score,
             alternatePhone: lead.alternateOfficialPhone,
             gbpPhone: lead.gbpPhone,
+            npi: lead.npi,
             // Only carried through when it actually disagrees with NPPES — the
             // common case (site confirms the same person, just with a title or
             // credential attached) has nothing worth flagging in an export.

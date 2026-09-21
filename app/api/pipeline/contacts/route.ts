@@ -11,6 +11,9 @@ import {
   EmailCandidate,
   ContactExportRow,
   buildContactsCsv,
+  finalizeContactsCsvRows,
+  CONTACTS_CSV_MAX_BRANCHES,
+  CONTACTS_CSV_MAX_PROVIDERS,
 } from '../../../../lib/contacts';
 import {
   verifyEmail,
@@ -95,10 +98,10 @@ export async function POST(req: Request) {
           orderBy: [{ score: 'desc' }, { id: 'asc' }],
           take: limit,
           select: {
-            id: true, organization: true, city: true, state: true, phone: true,
-            authorizedOfficialName: true, authorizedOfficialTitle: true,
+            id: true, organization: true, city: true, state: true, zip: true, phone: true,
+            npi: true, authorizedOfficialName: true, authorizedOfficialTitle: true,
             authorizedOfficialPhone: true, website_found: true,
-            score: true, tag: true,
+            score: true, tag: true, n_locations_detected: true, n_providers_at_location: true,
           },
         });
 
@@ -144,10 +147,14 @@ export async function POST(req: Request) {
           // --- Source 1: NPPES authorized official ------------------------
           const name = lead.authorizedOfficialName ? titleCase(lead.authorizedOfficialName) : null;
           const title = lead.authorizedOfficialTitle ? titleCase(lead.authorizedOfficialTitle) : null;
-          const phone = lead.authorizedOfficialPhone || lead.phone || null;
+          // CSV uses the AO number only so we can drop rows where it matches the
+          // practice line. Contact records still fall back to the practice phone
+          // when NPPES has no separate AO number — that is still a reachable line.
+          const aoPhone = lead.authorizedOfficialPhone || null;
+          const contactPhone = aoPhone || lead.phone || null;
 
           if (name) stats.named++;
-          if (phone) stats.phones++;
+          if (contactPhone) stats.phones++;
 
           // --- Source 2: the practice website -----------------------------
           let email: EmailCandidate | null = null;
@@ -212,7 +219,7 @@ export async function POST(req: Request) {
           const data = {
             decisionMakerName: name,
             decisionMakerTitle: title,
-            decisionMakerPhone: phone,
+            decisionMakerPhone: contactPhone,
             decisionMakerEmail: acceptedEmail?.email ?? null,
             decisionMakerLinkedIn: linkedIn,
             emailSource: acceptedEmail ? 'website' : null,
@@ -240,12 +247,16 @@ export async function POST(req: Request) {
 
           exportRows.push({
             organization: lead.organization,
+            npi: lead.npi,
             city: lead.city,
             state: lead.state,
+            zip: lead.zip,
+            nLocations: lead.n_locations_detected ?? 1,
+            nProviders: lead.n_providers_at_location ?? 0,
             practicePhone: lead.phone,
             decisionMakerName: name,
             decisionMakerTitle: title,
-            decisionMakerPhone: phone,
+            decisionMakerPhone: aoPhone,
             email: acceptedEmail?.email ?? null,
             emailConfidence: email?.confidence ?? null,
             emailVerifyStatus: verdict?.status ?? null,
@@ -347,8 +358,18 @@ export async function POST(req: Request) {
           });
         }
 
+        const finalized = finalizeContactsCsvRows(exportRows);
         const csv = buildContactsCsv(exportRows);
         const filename = `step4-contacts-${new Date(startedAt).toISOString().slice(0, 10)}.csv`;
+
+        send({
+          type: 'log',
+          message:
+            `CSV export — ${finalized.length.toLocaleString()} orgs kept ` +
+            `(≤${CONTACTS_CSV_MAX_BRANCHES} branches, ≤${CONTACTS_CSV_MAX_PROVIDERS} providers, ` +
+            `distinct practice vs decision-maker phone, one main office each) ` +
+            `from ${exportRows.length.toLocaleString()} processed leads.`,
+        });
 
         send({
           type: 'done',
@@ -360,7 +381,8 @@ export async function POST(req: Request) {
           message:
             `Built ${processed.toLocaleString()} contacts in ${((Date.now() - startedAt) / 1000).toFixed(0)}s — ` +
             `${stats.sendable.toLocaleString()} sendable email${stats.sendable === 1 ? '' : 's'}, ` +
-            `${stats.phones.toLocaleString()} with a phone.`,
+            `${stats.phones.toLocaleString()} with a phone. ` +
+            `CSV: ${finalized.length.toLocaleString()} unique orgs.`,
         });
       } catch (error) {
         send({ type: 'error', message: error instanceof Error ? error.message : String(error) });
