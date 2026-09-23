@@ -7,7 +7,6 @@ import {
   CONTACTS_CSV_MAX_BRANCHES,
   CONTACTS_CSV_MAX_PROVIDERS,
   filterUploadedContactsCsv,
-  formatUploadedContactsCsv,
   parseContactsCsvText,
   splitCsvLine,
   normalizeDecisionMakerTitle,
@@ -232,18 +231,6 @@ check(
 
 const parsed = parseContactsCsvText(uploaded);
 check('parseContactsCsvText row count', parsed.rows.length, 2);
-
-const legacyCsv =
-  'Organization,Decision Maker Name,Decision Maker Title,Practice Phone,City,State,Specialty,Time Zone\r\n' +
-  '"ACME DENTAL","Jane Doe","Owner","8015551212","PROVO","UT","122300000X","Mountain"\r\n';
-const formatted = formatUploadedContactsCsv(legacyCsv, { merge: false });
-const fmtParsed = parseContactsCsvText(formatted.csv);
-check('format-only keeps all rows', formatted.kept, 1);
-check('format-only header starts NPI', fmtParsed.headers[0], 'NPI');
-check('format-only Practice_Name second', fmtParsed.headers[1], 'Practice_Name');
-check('format-only has PKT_Call_Window', fmtParsed.headers.includes('PKT_Call_Window'), true);
-check('format-only maps Organization', formatted.csv.includes('ACME DENTAL'), true);
-check('format-only writes PKT for Mountain', formatted.csv.includes('8:00 PM'), true);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

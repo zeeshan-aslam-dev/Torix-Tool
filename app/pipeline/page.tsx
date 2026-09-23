@@ -422,8 +422,8 @@ export default function PipelinePage() {
         if (aiRowEnd.trim()) form.append("aiRowEnd", aiRowEnd.trim());
       }
 
-      // Use streaming endpoint for real-time logs
-      const res = await fetch("/api/pipeline/filter-csv-stream", {
+      // filter-csv now streams NDJSON with real-time progress
+      const res = await fetch("/api/pipeline/filter-csv", {
         method: "POST",
         body: form,
         signal: abortController.signal,
@@ -1050,9 +1050,9 @@ export default function PipelinePage() {
                 <div>
                   <strong>Filter / edit an existing contacts CSV</strong>
                   <div className={styles.hint}>
-                    Size filter only: match NPPES, keep ≤2 branches / ≤15 providers, optional AI
-                    provider refresh. For dialer <em>column order</em> on any old CSV (no drops), use{' '}
-                    <a href="/csv-format">CSV Format</a> in the sidebar.
+                    Upload an old Step 4 CSV. Matches NPPES data, keeps ≤2 branches / ≤15
+                    providers, merges same-org dual owners and same-owner dual orgs, then
+                    writes dialer columns (NPI, Practice_Name, taxonomy, ZIP, PKT_Call_Window, …).
                   </div>
                   <input
                     type="file"

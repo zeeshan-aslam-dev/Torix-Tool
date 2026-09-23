@@ -25,18 +25,6 @@ export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 export const maxDuration = 600;
 
-function streamLog(msg: string): string {
-  return JSON.stringify({ type: 'log', message: msg }) + '\n';
-}
-
-function streamUpdate(data: Record<string, unknown>): string {
-  return JSON.stringify({ type: 'update', ...data }) + '\n';
-}
-
-function streamDone(data: Record<string, unknown>): string {
-  return JSON.stringify({ type: 'done', ...data }) + '\n';
-}
-
 function readKeyBundleFromForm(form: FormData): Partial<AiKeyBundle> {
   return {
     openrouter: parseKeysField(form.get('openrouterKeys')),
@@ -48,9 +36,18 @@ function readKeyBundleFromForm(form: FormData): Partial<AiKeyBundle> {
 /**
  * Edits a previously exported contacts CSV into dialer column order.
  * Optional AI pass refreshes Providers; multiple keys per platform rotate on 429.
+ * Streams NDJSON with real-time progress.
  */
 export async function POST(req: Request) {
-  try {
+  const encoder = new TextEncoder();
+
+  const stream = new ReadableStream({
+    async start(controller) {
+      const send = (event: Record<string, unknown>) => {
+        controller.enqueue(encoder.encode(JSON.stringify(event) + '\n'));
+      };
+
+      try {
     const contentType = req.headers.get('content-type') || '';
     let csvText = '';
     let maxBranches = CONTACTS_CSV_MAX_BRANCHES;
@@ -124,13 +121,19 @@ export async function POST(req: Request) {
     }
 
     if (!csvText.trim()) {
-      return Response.json({ error: 'CSV is empty.' }, { status: 400 });
+      send({ type: 'error', message: 'CSV is empty.' });
+      controller.close();
+      return;
     }
 
     const { rows } = parseContactsCsvText(csvText);
     if (rows.length === 0) {
-      return Response.json({ error: 'No data rows found in the CSV.' }, { status: 400 });
+      send({ type: 'error', message: 'No data rows found in the CSV.' });
+      controller.close();
+      return;
     }
+
+    send({ type: 'log', message: `Filtering by size (≤${maxBranches} branches, ≤${maxProviders} providers)...` });
 
     const lookup = await buildSizeLookup(rows);
     const result = filterUploadedContactsCsv(csvText, (row) => lookupSize(row, lookup), {
@@ -148,15 +151,13 @@ export async function POST(req: Request) {
     const backendLabel = activeAiBackendLabel(keyBundle);
     let rotator: AiKeyRotator | null = null;
 
+    send({ type: 'log', message: `Kept ${result.kept} of ${result.total} rows.` });
+
     if (useAiProviders) {
       if (!aiProviderConfigured(keyBundle)) {
-        return Response.json(
-          {
-            error:
-              'AI provider refresh requested but no API keys were provided. Open AI API keys, add OpenRouter / Groq / Gemini keys, or set them in .env.',
-          },
-          { status: 400 }
-        );
+        send({ type: 'error', message: 'AI provider refresh requested but no API keys were provided.' });
+        controller.close();
+        return;
       }
 
       rotator = new AiKeyRotator(keyBundle);
@@ -193,6 +194,8 @@ export async function POST(req: Request) {
       const outOfRangeCount = eligibleRows.length - workRows.length;
       if (outOfRangeCount > 0) aiSkipped += outOfRangeCount;
 
+      send({ type: 'log', message: `Starting AI provider refresh on rows ${rangeStart}-${rangeEnd} (${workRows.length} rows)...` });
+
       let rowIndex = 0;
       await mapProviderCountLookups(workRows, concurrency, async (row) => {
         rowIndex++;
@@ -225,8 +228,14 @@ export async function POST(req: Request) {
         }
         // Progress update every 5 rows or at the end
         if (rowIndex % 5 === 0 || rowIndex === workRows.length) {
-          // This would be where we'd send a progress event in streaming mode
-          // For now, just track progress internally
+          send({
+            type: 'progress',
+            current: rowIndex,
+            total: workRows.length,
+            updated: aiUpdated,
+            failed: aiFailed,
+            message: `Row ${rowIndex}/${workRows.length} — updated ${aiUpdated}, failed ${aiFailed}`,
+          });
         }
       });
 
@@ -258,7 +267,17 @@ export async function POST(req: Request) {
         (topFails ? ` (sample fails: ${topFails})` : '')
       : '';
 
-    return Response.json({
+    const message =
+      `Kept ${result.kept.toLocaleString()} of ${result.total.toLocaleString()} rows ` +
+      `(≤${maxBranches} branches, ≤${maxProviders} providers); ` +
+      `dialer columns (NPI…PKT_Call_Window) with taxonomy / ZIP from NPPES` +
+      `${result.droppedOversize ? `; dropped ${result.droppedOversize.toLocaleString()} oversize` : ''}` +
+      `${result.unmatched ? `; ${result.unmatched.toLocaleString()} unmatched in the database` : ''}` +
+      aiNote +
+      '.';
+
+    send({
+      type: 'done',
       csv,
       filename,
       kept: result.kept,
@@ -267,32 +286,30 @@ export async function POST(req: Request) {
       total: result.total,
       maxBranches,
       maxProviders,
-      geminiUpdated: aiUpdated,
-      geminiFailed: aiFailed,
-      geminiSkipped: aiSkipped,
       aiUpdated,
       aiFailed,
       aiSkipped,
-      aiBackend: useAiProviders ? backendLabel.toLowerCase() : null,
       aiEligibleTotal,
       aiRowStart: aiRowStart || 1,
       aiRowEnd: aiRowEnd || aiEligibleTotal,
       keyRotations: rotator?.rotations ?? 0,
-      message:
-        `Kept ${result.kept.toLocaleString()} of ${result.total.toLocaleString()} rows ` +
-        `(≤${maxBranches} branches, ≤${maxProviders} providers); ` +
-        `dialer columns (NPI…PKT_Call_Window) with taxonomy / ZIP from NPPES` +
-        `${result.droppedOversize ? `; dropped ${result.droppedOversize.toLocaleString()} oversize` : ''}` +
-        `${result.unmatched ? `; ${result.unmatched.toLocaleString()} unmatched in the database` : ''}` +
-        aiNote +
-        '.',
+      message,
     });
-  } catch (error) {
-    return Response.json(
-      { error: error instanceof Error ? error.message : String(error) },
-      { status: 500 }
-    );
-  }
+    controller.close();
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      send({ type: 'error', message: msg });
+      controller.close();
+    }
+  },
+  });
+
+  return new Response(stream, {
+    headers: {
+      'Content-Type': 'application/x-ndjson',
+      'Cache-Control': 'no-cache',
+    },
+  });
 }
 
 
