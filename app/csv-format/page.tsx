@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { Download, FileSpreadsheet, Upload } from 'lucide-react';
+import { Download, FileSpreadsheet } from 'lucide-react';
 import styles from '../pipeline/page.module.css';
 
 const errorMessage = (error: unknown) => (error instanceof Error ? error.message : String(error));

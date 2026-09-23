@@ -209,7 +209,7 @@ check('parseKeysField newlines', parseKeysField('k1\nk2'), ['k1', 'k2']);
 {
   const rot = new AiKeyRotator({ openrouter: ['or1', 'or2'], groq: [], gemini: [] });
   check('rotator starts on first key', rot.currentOpenRouter()?.index, 0);
-  rot.markOpenRouterLimited(0, 60_000);
+  rot.markOpenRouterLimited();
   check('rotator advances after limit', rot.currentOpenRouter()?.key, 'or2');
   check('rotator rotation count', rot.rotations, 1);
 }

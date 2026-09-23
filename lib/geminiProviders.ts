@@ -197,7 +197,7 @@ export class AiKeyRotator {
     return { key: this.bundle.openrouter[i], index: i };
   }
 
-  markOpenRouterLimited(_index: number, _cooldownMs = 0): void {
+  markOpenRouterLimited(): void {
     this.rotations++;
     this.orIdx = (this.orIdx + 1) % Math.max(1, this.bundle.openrouter.length);
   }
@@ -222,7 +222,7 @@ export class AiKeyRotator {
     return { key: this.bundle.groq[i], index: i };
   }
 
-  markGroqLimited(_index: number, _cooldownMs = 0): void {
+  markGroqLimited(): void {
     this.rotations++;
     this.groqIdx = (this.groqIdx + 1) % Math.max(1, this.bundle.groq.length);
   }
@@ -247,7 +247,7 @@ export class AiKeyRotator {
     return { key: this.bundle.gemini[i], index: i };
   }
 
-  markGeminiLimited(_index: number, _cooldownMs = 0): void {
+  markGeminiLimited(): void {
     this.rotations++;
     this.geminiIdx = (this.geminiIdx + 1) % Math.max(1, this.bundle.gemini.length);
   }
@@ -384,7 +384,7 @@ async function askOpenRouter(
           const body = await res.text().catch(() => '');
           errors.push(`key#${slot.index + 1}/${model} HTTP ${res.status}`);
           if (isRateLimitStatus(res.status)) {
-            rotator.markOpenRouterLimited(slot.index);
+            rotator.markOpenRouterLimited();
             rateLimitedThisKey = true;
             break;
           }
@@ -400,7 +400,7 @@ async function askOpenRouter(
           const msg = data.error.message;
           errors.push(`key#${slot.index + 1}/${model}: ${msg.slice(0, 100)}`);
           if (/rate.?limit|429|temporarily|overloaded/i.test(msg)) {
-            rotator.markOpenRouterLimited(slot.index);
+            rotator.markOpenRouterLimited();
             rateLimitedThisKey = true;
             break;
           }
@@ -420,7 +420,7 @@ async function askOpenRouter(
     }
 
     if (!rateLimitedThisKey) {
-      rotator.markOpenRouterLimited(slot.index);
+      rotator.markOpenRouterLimited();
     }
   }
 
@@ -465,11 +465,11 @@ async function askGroq(
         const body = await res.text().catch(() => '');
         errors.push(`key#${slot.index + 1} HTTP ${res.status}`);
         if (isRateLimitStatus(res.status)) {
-          rotator.markGroqLimited(slot.index);
+          rotator.markGroqLimited();
           continue;
         }
         if (body) errors[errors.length - 1] += `: ${body.slice(0, 80)}`;
-        rotator.markGroqLimited(slot.index);
+        rotator.markGroqLimited();
         continue;
       }
 
@@ -479,13 +479,13 @@ async function askGroq(
       const text = data.choices?.[0]?.message?.content ?? '';
       if (!text.trim()) {
         errors.push(`key#${slot.index + 1}: empty`);
-        rotator.markGroqLimited(slot.index);
+        rotator.markGroqLimited();
         continue;
       }
       return { ...parseProviderCountJson(text), backend: 'groq' };
     } catch (e) {
       errors.push(`key#${slot.index + 1}: ${e instanceof Error ? e.message : String(e)}`);
-      rotator.markGroqLimited(slot.index);
+      rotator.markGroqLimited();
     }
   }
 
@@ -528,11 +528,11 @@ async function askGemini(
         const body = await res.text().catch(() => '');
         errors.push(`key#${slot.index + 1} HTTP ${res.status}`);
         if (isRateLimitStatus(res.status) || res.status === 403) {
-          rotator.markGeminiLimited(slot.index);
+          rotator.markGeminiLimited();
           continue;
         }
         if (body) errors[errors.length - 1] += `: ${body.slice(0, 80)}`;
-        rotator.markGeminiLimited(slot.index);
+        rotator.markGeminiLimited();
         continue;
       }
 
@@ -542,13 +542,13 @@ async function askGemini(
       const text = data.candidates?.[0]?.content?.parts?.map((p) => p.text ?? '').join('') ?? '';
       if (!text.trim()) {
         errors.push(`key#${slot.index + 1}: empty`);
-        rotator.markGeminiLimited(slot.index);
+        rotator.markGeminiLimited();
         continue;
       }
       return { ...parseProviderCountJson(text), backend: 'gemini' };
     } catch (e) {
       errors.push(`key#${slot.index + 1}: ${e instanceof Error ? e.message : String(e)}`);
-      rotator.markGeminiLimited(slot.index);
+      rotator.markGeminiLimited();
     }
   }
 

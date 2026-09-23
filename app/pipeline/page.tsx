@@ -476,7 +476,7 @@ export default function PipelinePage() {
             } else if (event.type === 'error') {
               addLog(`Error: ${event.message || 'Unknown error'}`);
             }
-          } catch (e) {
+          } catch {
             // Ignore parse errors in streaming
           }
         }
