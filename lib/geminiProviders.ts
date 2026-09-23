@@ -360,7 +360,9 @@ async function askOpenRouter(
     const slot = await rotator.acquireOpenRouter(12_000);
     if (!slot) break;
 
-    let rateLimitedThisKey = false;
+    // Try every free model on this key before rotating — a 429 on one model
+    // (often a shared free-tier pool saturated upstream) doesn't mean the key
+    // itself is limited; another model in the list may still work right now.
     for (const model of models) {
       try {
         const res = await fetchImpl('https://openrouter.ai/api/v1/chat/completions', {
@@ -383,11 +385,6 @@ async function askOpenRouter(
         if (!res.ok) {
           const body = await res.text().catch(() => '');
           errors.push(`key#${slot.index + 1}/${model} HTTP ${res.status}`);
-          if (isRateLimitStatus(res.status)) {
-            rotator.markOpenRouterLimited();
-            rateLimitedThisKey = true;
-            break;
-          }
           if (body) errors[errors.length - 1] += `: ${body.slice(0, 80)}`;
           continue;
         }
@@ -397,13 +394,7 @@ async function askOpenRouter(
           error?: { message?: string; code?: number };
         };
         if (data.error?.message) {
-          const msg = data.error.message;
-          errors.push(`key#${slot.index + 1}/${model}: ${msg.slice(0, 100)}`);
-          if (/rate.?limit|429|temporarily|overloaded/i.test(msg)) {
-            rotator.markOpenRouterLimited();
-            rateLimitedThisKey = true;
-            break;
-          }
+          errors.push(`key#${slot.index + 1}/${model}: ${data.error.message.slice(0, 100)}`);
           continue;
         }
         const text = data.choices?.[0]?.message?.content ?? '';
@@ -419,9 +410,8 @@ async function askOpenRouter(
       }
     }
 
-    if (!rateLimitedThisKey) {
-      rotator.markOpenRouterLimited();
-    }
+    // Every model failed on this key — move to the next key (if any).
+    rotator.markOpenRouterLimited();
   }
 
   return {
