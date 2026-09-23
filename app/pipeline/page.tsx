@@ -436,49 +436,69 @@ export default function PipelinePage() {
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let csvData: { csv?: string; filename?: string; kept?: number; message?: string } | null = null;
+      // Latest partial CSV seen so far (from a progress checkpoint). Used as a
+      // fallback if the run is stopped or fails before a final "done" event.
+      let checkpoint: { csv?: string; filename?: string; kept?: number } | null = null;
       let buffer = '';
+      let cancelled = false;
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
 
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines[lines.length - 1];
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines[lines.length - 1];
 
-        for (const line of lines.slice(0, -1)) {
-          if (!line.trim()) continue;
-          try {
-            const event = JSON.parse(line) as {
-              type: string;
-              message?: string;
-              current?: number;
-              total?: number;
-              updated?: number;
-              failed?: number;
-              csv?: string;
-              filename?: string;
-              kept?: number;
-              [key: string]: unknown;
-            };
-            if (event.type === 'log') {
-              addLog(event.message || '');
-            } else if (event.type === 'progress') {
-              addLog(event.message || `Row ${event.current}/${event.total}`);
-            } else if (event.type === 'done') {
-              csvData = {
-                csv: event.csv as string,
-                filename: event.filename as string,
-                kept: event.kept as number,
-                message: event.message as string,
+          for (const line of lines.slice(0, -1)) {
+            if (!line.trim()) continue;
+            try {
+              const event = JSON.parse(line) as {
+                type: string;
+                message?: string;
+                current?: number;
+                total?: number;
+                updated?: number;
+                failed?: number;
+                csv?: string;
+                filename?: string;
+                kept?: number;
+                [key: string]: unknown;
               };
-              addLog(event.message || 'Done.');
-            } else if (event.type === 'error') {
-              addLog(`Error: ${event.message || 'Unknown error'}`);
+              if (event.type === 'log') {
+                addLog(event.message || '');
+              } else if (event.type === 'progress') {
+                addLog(event.message || `Row ${event.current}/${event.total}`);
+                if (event.csv) {
+                  checkpoint = {
+                    csv: event.csv as string,
+                    filename: event.filename as string,
+                    kept: event.kept as number,
+                  };
+                }
+              } else if (event.type === 'done') {
+                csvData = {
+                  csv: event.csv as string,
+                  filename: event.filename as string,
+                  kept: event.kept as number,
+                  message: event.message as string,
+                };
+                addLog(event.message || 'Done.');
+              } else if (event.type === 'error') {
+                addLog(`Error: ${event.message || 'Unknown error'}`);
+              }
+            } catch {
+              // Ignore parse errors in streaming
             }
-          } catch {
-            // Ignore parse errors in streaming
           }
+        }
+      } catch (e) {
+        if (e instanceof Error && e.name === 'AbortError') {
+          cancelled = true;
+          addLog("Filter CSV cancelled by user.");
+        } else {
+          throw e;
         }
       }
 
@@ -488,6 +508,17 @@ export default function PipelinePage() {
           filename: csvData.filename ?? 'filtered-contacts.csv',
           rows: csvData.kept ?? 0,
         });
+      } else if (checkpoint?.csv) {
+        setFilterCsvReady({
+          csv: checkpoint.csv,
+          filename: checkpoint.filename ?? 'filtered-contacts-partial.csv',
+          rows: checkpoint.kept ?? 0,
+        });
+        addLog(
+          cancelled
+            ? "Partial results ready — download reflects progress up to the last checkpoint before you stopped."
+            : "Run ended early — partial results ready for download."
+        );
       } else {
         addLog("No CSV data received from server.");
       }

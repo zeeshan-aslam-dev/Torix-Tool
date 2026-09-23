@@ -226,8 +226,11 @@ export async function POST(req: Request) {
           const reason = (looked.evidence || 'unknown').slice(0, 120);
           failReasons.set(reason, (failReasons.get(reason) || 0) + 1);
         }
-        // Progress update every 5 rows or at the end
+        // Progress update every 5 rows or at the end. Includes a checkpoint CSV
+        // (current state of every row processed so far) so the client always has
+        // something downloadable if the run is stopped early or disconnects.
         if (rowIndex % 5 === 0 || rowIndex === workRows.length) {
+          const checkpointCsv = buildDialerCsvFromRecords(finalRows);
           send({
             type: 'progress',
             current: rowIndex,
@@ -235,6 +238,9 @@ export async function POST(req: Request) {
             updated: aiUpdated,
             failed: aiFailed,
             message: `Row ${rowIndex}/${workRows.length} — updated ${aiUpdated}, failed ${aiFailed}`,
+            csv: checkpointCsv,
+            filename: `filtered-contacts-${new Date().toISOString().slice(0, 10)}.csv`,
+            kept: result.kept,
           });
         }
       });
