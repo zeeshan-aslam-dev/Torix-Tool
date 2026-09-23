@@ -99,9 +99,10 @@ export async function POST(req: Request) {
           take: limit,
           select: {
             id: true, organization: true, city: true, state: true, zip: true, phone: true,
-            npi: true, authorizedOfficialName: true, authorizedOfficialTitle: true,
+            address: true, npi: true, taxonomy: true, authorizedOfficialName: true, authorizedOfficialTitle: true,
             authorizedOfficialPhone: true, website_found: true,
             score: true, tag: true, n_locations_detected: true, n_providers_at_location: true,
+            enumerationDate: true, timezone: true,
           },
         });
 
@@ -248,6 +249,8 @@ export async function POST(req: Request) {
           exportRows.push({
             organization: lead.organization,
             npi: lead.npi,
+            taxonomy: lead.taxonomy,
+            address: lead.address,
             city: lead.city,
             state: lead.state,
             zip: lead.zip,
@@ -266,6 +269,8 @@ export async function POST(req: Request) {
             webOwnerName: ownerDiffers ? webOwner!.name : null,
             score: lead.score,
             tag: lead.tag,
+            enumerationDate: lead.enumerationDate,
+            timezone: lead.timezone,
           });
 
           // A re-check can drop an address that a later filter rejected. Anything

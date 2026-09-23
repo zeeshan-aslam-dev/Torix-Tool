@@ -250,6 +250,9 @@ export type ContactExportRow = {
   organization: string;
   /** NPPES National Provider Identifier for this practice location. */
   npi: string | null;
+  /** NUCC taxonomy code from NPPES (e.g. 207Q00000X). */
+  taxonomy: string | null;
+  address: string | null;
   city: string;
   state: string;
   zip: string;
@@ -270,6 +273,8 @@ export type ContactExportRow = {
   webOwnerName: string | null;
   score: number;
   tag: string | null;
+  enumerationDate?: Date | string | null;
+  timezone?: string | null;
   /** Filled by finalizeContactsCsvRows — how many branches this org kept. */
   branchCount?: number;
 };
@@ -278,6 +283,38 @@ export type ContactExportRow = {
 export const CONTACTS_CSV_MAX_BRANCHES = 2;
 /** Sites with more NPPES providers than this are dropped from the CSV. */
 export const CONTACTS_CSV_MAX_PROVIDERS = 15;
+
+/** Dialer-facing columns — always first, in this exact order. */
+export const DIALER_FRONT_COLUMNS = [
+  'NPI',
+  'Practice_Name',
+  'Authorized_Person',
+  'Authorized_Title',
+  'Phone',
+  'Address',
+  'City',
+  'State',
+  'ZIP',
+  'taxonomy',
+  'Enumeration_Date',
+  'Time_Zone',
+  'PKT_Call_Window',
+] as const;
+
+/** Extra columns appended after the dialer block. */
+export const DIALER_TRAILING_COLUMNS = [
+  'Providers',
+  'Branches',
+  'Tag',
+  'Score',
+  'Email',
+  'Email Confidence',
+  'Email Verify Status',
+  'Sendable',
+  'Website',
+  'LinkedIn',
+  'Site-Stated Owner (if different from NPPES)',
+] as const;
 
 /** Last 10 digits of a US phone, or '' if too short to compare. */
 export function digitsPhone(phone: string | null | undefined): string {
@@ -293,8 +330,7 @@ export function phonesAreSame(a: string | null | undefined, b: string | null | u
 
 /**
  * Step 4 CSV shaping:
- * 1. Drop rows where practice phone and decision-maker phone are the same number
- *    (no separate direct line).
+ * 1. Drop rows where practice phone and decision-maker phone are the same number.
  * 2. Keep only orgs with 1–2 branches (max 2); drop larger chains.
  * 3. Keep only sites with ≤15 NPPES providers at the location.
  * 4. One row per org — the highest-scoring location as the main office.
@@ -302,8 +338,6 @@ export function phonesAreSame(a: string | null | undefined, b: string | null | u
  */
 export function finalizeContactsCsvRows(rows: ContactExportRow[]): ContactExportRow[] {
   const withDistinctPhones = rows.filter((r) => {
-    // Need both numbers, and they must differ — otherwise there is no separate
-    // direct line for the decision maker.
     if (!r.practicePhone || !r.decisionMakerPhone) return false;
     return !phonesAreSame(r.practicePhone, r.decisionMakerPhone);
   });
@@ -318,7 +352,7 @@ export function finalizeContactsCsvRows(rows: ContactExportRow[]): ContactExport
   }
 
   const out: ContactExportRow[] = [];
-  for (const group of byOrg.values()) {
+  for (const group of Array.from(byOrg.values())) {
     const fromFile = new Set(
       group.map((r) => `${(r.city || '').toUpperCase()}|${r.zip || ''}|${(r.state || '').toUpperCase()}`)
     ).size;
@@ -331,7 +365,6 @@ export function finalizeContactsCsvRows(rows: ContactExportRow[]): ContactExport
 
     const main = group.reduce((best, row) => {
       if (row.score !== best.score) return row.score > best.score ? row : best;
-      // Stable tie-break: earlier city name, then zip.
       const a = `${best.city}|${best.zip}`;
       const b = `${row.city}|${row.zip}`;
       return b < a ? row : best;
@@ -344,20 +377,31 @@ export function finalizeContactsCsvRows(rows: ContactExportRow[]): ContactExport
   return out;
 }
 
+function formatEnumerationDate(value: Date | string | null | undefined): string {
+  if (!value) return '';
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return String(value).slice(0, 10);
+  return d.toISOString().slice(0, 10);
+}
+
 const CONTACTS_CSV_COLUMNS: { header: string; get: (r: ContactExportRow) => string }[] = [
-  { header: 'Organization', get: (r) => r.organization },
   { header: 'NPI', get: (r) => r.npi ?? '' },
-  { header: 'Branches', get: (r) => String(r.branchCount ?? r.nLocations ?? '') },
-  { header: 'Providers', get: (r) => String(r.nProviders ?? '') },
+  { header: 'Practice_Name', get: (r) => r.organization },
+  { header: 'Authorized_Person', get: (r) => r.decisionMakerName ?? '' },
+  { header: 'Authorized_Title', get: (r) => normalizeDecisionMakerTitle(r.decisionMakerTitle) },
+  { header: 'Phone', get: (r) => r.practicePhone ?? '' },
+  { header: 'Address', get: (r) => r.address ?? '' },
   { header: 'City', get: (r) => r.city },
-  { header: 'ZIP', get: (r) => r.zip },
   { header: 'State', get: (r) => r.state },
+  { header: 'ZIP', get: (r) => r.zip },
+  { header: 'taxonomy', get: (r) => formatTaxonomyCell(r.taxonomy) },
+  { header: 'Enumeration_Date', get: (r) => formatEnumerationDate(r.enumerationDate) },
+  { header: 'Time_Zone', get: (r) => r.timezone ?? '' },
+  { header: 'PKT_Call_Window', get: (r) => pktCallWindow(r.timezone) },
+  { header: 'Providers', get: (r) => String(r.nProviders ?? '') },
+  { header: 'Branches', get: (r) => String(r.branchCount ?? r.nLocations ?? '') },
   { header: 'Tag', get: (r) => r.tag ?? '' },
   { header: 'Score', get: (r) => String(r.score) },
-  { header: 'Practice Phone', get: (r) => r.practicePhone ?? '' },
-  { header: 'Decision Maker Name', get: (r) => r.decisionMakerName ?? '' },
-  { header: 'Decision Maker Title', get: (r) => r.decisionMakerTitle ?? '' },
-  { header: 'Decision Maker Phone', get: (r) => r.decisionMakerPhone ?? '' },
   { header: 'Email', get: (r) => r.email ?? '' },
   { header: 'Email Confidence', get: (r) => (r.emailConfidence == null ? '' : String(r.emailConfidence)) },
   { header: 'Email Verify Status', get: (r) => r.emailVerifyStatus ?? '' },
@@ -366,6 +410,93 @@ const CONTACTS_CSV_COLUMNS: { header: string; get: (r: ContactExportRow) => stri
   { header: 'LinkedIn', get: (r) => r.linkedin ?? '' },
   { header: 'Site-Stated Owner (if different from NPPES)', get: (r) => r.webOwnerName ?? '' },
 ];
+
+/** Preferred column order for Step 4 exports and the upload/edit-CSV path. */
+export const PREFERRED_CSV_COLUMN_ORDER = CONTACTS_CSV_COLUMNS.map((c) => c.header);
+
+export function normalizeDecisionMakerTitle(raw: string | null | undefined): string {
+  const text = (raw ?? '').trim();
+  if (!text) return '';
+
+  const upper = text.toUpperCase().replace(/\s+/g, ' ');
+  const hasCeo = /\bCEO\b/.test(upper) || upper.includes('CHIEF EXECUTIVE');
+  const hasPresident = /\bPRESIDENT\b/.test(upper);
+  const hasOwner = /\bOWNER\b/.test(upper) || /\bPROPRIETOR\b/.test(upper);
+  const hasMedDir = upper.includes('MEDICAL DIRECTOR');
+
+  if (hasCeo && hasPresident) {
+    const extras: string[] = [];
+    if (hasOwner) extras.push('Owner');
+    if (hasMedDir) extras.push('Medical Director');
+    return extras.length ? `CEO/President/${extras.join('/')}` : 'CEO/President';
+  }
+
+  if (hasCeo && !hasPresident) {
+    if (/^CHIEF EXECUTIVE OFFICER$/i.test(text.trim())) return 'CEO';
+  }
+
+  return text;
+}
+
+export function taxonomySpecialtyLabel(code: string | null | undefined): string {
+  const tax = (code ?? '').trim().toUpperCase();
+  if (!tax) return '';
+
+  const PREFIX_LABELS: Array<[string, string]> = [
+    ['1223G', 'General Dentistry'],
+    ['1223', 'Dentist'],
+    ['207Q', 'Family Medicine'],
+    ['207R', 'Internal Medicine'],
+    ['207V', 'Obstetrics & Gynecology'],
+    ['207X', 'Orthopaedic Surgery'],
+    ['2080', 'Pediatrics'],
+    ['2084', 'Psychiatry & Neurology'],
+    ['208D', 'General Practice'],
+    ['213E', 'Podiatrist'],
+    ['152W', 'Optometrist'],
+    ['111N', 'Chiropractor'],
+    ['363L', 'Nurse Practitioner'],
+    ['363A', 'Physician Assistant'],
+  ];
+
+  for (const [prefix, label] of PREFIX_LABELS) {
+    if (tax.startsWith(prefix)) return label;
+  }
+  return '';
+}
+
+/** Single `taxonomy` cell: "Family Medicine (207Q00000X)" when both exist. */
+export function formatTaxonomyCell(code: string | null | undefined): string {
+  const tax = (code ?? '').trim();
+  if (!tax) return '';
+  const label = taxonomySpecialtyLabel(tax);
+  if (label) return `${label} (${tax.toUpperCase()})`;
+  return tax.toUpperCase();
+}
+
+/** Pakistan call window derived from the US practice time zone. */
+export function pktCallWindow(timezone: string | null | undefined): string {
+  const tz = (timezone ?? '').trim().toLowerCase();
+  if (!tz) return '';
+  if (tz.includes('eastern')) return '6:00 PM – 10:00 PM PKT';
+  if (tz.includes('central')) return '7:00 PM – 11:00 PM PKT';
+  if (tz.includes('mountain')) return '8:00 PM – 12:00 AM PKT';
+  if (tz.includes('pacific')) return '9:00 PM – 1:00 AM PKT';
+  if (tz.includes('alaska')) return '10:00 PM – 2:00 AM PKT';
+  if (tz.includes('hawaii')) return '12:00 AM – 4:00 AM PKT';
+  if (tz.includes('atlantic')) return '5:00 PM – 9:00 PM PKT';
+  return '';
+}
+
+/** Normalise a person name for merge keys (case / punctuation). */
+export function normalizePersonKey(name: string | null | undefined): string {
+  return (name ?? '')
+    .toUpperCase()
+    .replace(/[.']/g, '')
+    .replace(/[^A-Z0-9 ]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
 
 export function buildContactsCsv(rows: ContactExportRow[]): string {
   const finalized = finalizeContactsCsvRows(rows);
@@ -385,9 +516,17 @@ export type PracticeSize = {
   npi: string | null;
   branches: number;
   providers: number;
+  taxonomy?: string | null;
+  decisionMakerTitle?: string | null;
+  decisionMakerName?: string | null;
+  address?: string | null;
+  zip?: string | null;
+  enumerationDate?: string | null;
+  timezone?: string | null;
+  website?: string | null;
+  gbpWebsite?: string | null;
 };
 
-/** RFC-style CSV line split that respects quoted commas. */
 export function splitCsvLine(line: string): string[] {
   const out: string[] = [];
   let cur = '';
@@ -418,7 +557,6 @@ export function splitCsvLine(line: string): string[] {
   return out;
 }
 
-/** Parses a whole CSV text into header names + row objects. */
 export function parseContactsCsvText(text: string): { headers: string[]; rows: CsvRecord[] } {
   const lines = text
     .replace(/^\uFEFF/, '')
@@ -441,7 +579,7 @@ export function parseContactsCsvText(text: string): { headers: string[]; rows: C
   return { headers, rows };
 }
 
-function cell(row: CsvRecord, ...names: string[]): string {
+export function cell(row: CsvRecord, ...names: string[]): string {
   for (const name of names) {
     const exact = row[name];
     if (exact != null && exact !== '') return exact;
@@ -459,37 +597,157 @@ function parsePositiveInt(raw: string): number | null {
   return Number.isFinite(n) && n >= 0 ? Math.floor(n) : null;
 }
 
-/** Pulls size hints already present on an uploaded row, when the columns exist. */
 export function sizeFromCsvRow(row: CsvRecord): Partial<PracticeSize> {
   const npi = cell(row, 'NPI', 'NPPES Number', 'NPPES', 'npi') || null;
   const branches = parsePositiveInt(cell(row, 'Branches', 'Branch Count', 'Locations', 'n_locations_detected'));
   const providers = parsePositiveInt(cell(row, 'Providers', 'Provider Count', 'n_providers_at_location'));
+  const taxonomyRaw = cell(row, 'taxonomy', 'Taxonomy', 'Taxonomy Code');
+  const taxonomyMatch = taxonomyRaw.match(/\(([A-Z0-9]+)\)\s*$/i);
+  const taxonomy = taxonomyMatch ? taxonomyMatch[1].toUpperCase() : (taxonomyRaw || null);
   return {
     npi: npi || null,
     ...(branches != null ? { branches } : {}),
     ...(providers != null ? { providers } : {}),
+    ...(taxonomy ? { taxonomy } : {}),
   };
 }
 
-export function csvRowMatchKey(row: CsvRecord): { npi: string | null; orgKey: string; city: string; state: string; zip: string } {
+export function csvRowMatchKey(row: CsvRecord): {
+  npi: string | null;
+  orgKey: string;
+  personKey: string;
+  city: string;
+  state: string;
+  zip: string;
+} {
   const npi = cell(row, 'NPI', 'NPPES Number', 'NPPES', 'npi') || null;
-  const org = cell(row, 'Organization', 'Company Name', 'Company');
+  const org = cell(row, 'Practice_Name', 'Organization', 'Company Name', 'Company');
+  const person = cell(row, 'Authorized_Person', 'Decision Maker Name');
   return {
     npi: npi && /^\d{10}$/.test(npi) ? npi : npi || null,
     orgKey: normalizeOrgName(org),
+    personKey: normalizePersonKey(person),
     city: cell(row, 'City').toUpperCase(),
     state: cell(row, 'State').toUpperCase(),
     zip: cell(row, 'ZIP', 'Zip', 'Postal Code').slice(0, 5),
   };
 }
 
+export function reorderCsvHeaders(existing: string[]): string[] {
+  const byLower = new Map(existing.map((h) => [h.toLowerCase(), h]));
+  const out: string[] = [];
+  const used = new Set<string>();
+
+  for (const name of PREFERRED_CSV_COLUMN_ORDER) {
+    out.push(name);
+    const prior = byLower.get(name.toLowerCase());
+    used.add((prior ?? name).toLowerCase());
+  }
+
+  // Drop superseded legacy headers so they are not duplicated at the end.
+  const skipLegacy = new Set([
+    'organization', 'company name', 'company', 'decision maker name',
+    'decision maker title', 'practice phone', 'specialty', 'taxonomy code',
+    'nppes', 'nppes number', 'zip code', 'postal code',
+  ]);
+
+  for (const h of existing) {
+    const lower = h.toLowerCase();
+    if (used.has(lower) || skipLegacy.has(lower)) continue;
+    out.push(h);
+    used.add(lower);
+  }
+  return out;
+}
+
+function joinUnique(parts: string[], sep = ' / '): string {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const p of parts) {
+    const t = p.trim();
+    if (!t) continue;
+    const key = t.toUpperCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(t);
+  }
+  return out.join(sep);
+}
+
+function scoreOf(row: CsvRecord): number {
+  const n = Number(cell(row, 'Score') || '0');
+  return Number.isFinite(n) ? n : 0;
+}
+
 /**
- * Filters an uploaded contacts CSV to practices within the size caps.
- *
- * `resolveSize` is supplied by the API (DB lookup). When the CSV already has
- * Branches/Providers columns those win as a fallback if the lookup misses.
- * Rows that cannot be sized are dropped — better than letting oversized orgs
- * through an unverified path.
+ * Merge same-org / different-owner rows and same-owner / different-org rows.
+ */
+export function mergeDialerCsvRows(rows: CsvRecord[]): CsvRecord[] {
+  // Pass 1 — same organization, combine owners.
+  const byOrg = new Map<string, CsvRecord[]>();
+  for (const row of rows) {
+    const key = csvRowMatchKey(row).orgKey || `__row_${byOrg.size}`;
+    const list = byOrg.get(key);
+    if (list) list.push(row);
+    else byOrg.set(key, [row]);
+  }
+
+  const afterOrg: CsvRecord[] = [];
+  for (const group of Array.from(byOrg.values())) {
+    if (group.length === 1) {
+      afterOrg.push(group[0]);
+      continue;
+    }
+    const primary = group.reduce((best, row) => (scoreOf(row) > scoreOf(best) ? row : best));
+    const people = group.map((r) => cell(r, 'Authorized_Person', 'Decision Maker Name'));
+    const titles = group.map((r) =>
+      normalizeDecisionMakerTitle(cell(r, 'Authorized_Title', 'Decision Maker Title'))
+    );
+    afterOrg.push({
+      ...primary,
+      Authorized_Person: joinUnique(people),
+      Authorized_Title: joinUnique(titles),
+      Practice_Name:
+        cell(primary, 'Practice_Name', 'Organization') || primary['Practice_Name'] || '',
+    });
+  }
+
+  // Pass 2 — same owner, combine organizations.
+  const byPerson = new Map<string, CsvRecord[]>();
+  const noPerson: CsvRecord[] = [];
+  for (const row of afterOrg) {
+    const person = normalizePersonKey(cell(row, 'Authorized_Person', 'Decision Maker Name'));
+    if (!person) {
+      noPerson.push(row);
+      continue;
+    }
+    const list = byPerson.get(person);
+    if (list) list.push(row);
+    else byPerson.set(person, [row]);
+  }
+
+  const out: CsvRecord[] = [...noPerson];
+  for (const group of Array.from(byPerson.values())) {
+    if (group.length === 1) {
+      out.push(group[0]);
+      continue;
+    }
+    const primary = group.reduce((best, row) => (scoreOf(row) > scoreOf(best) ? row : best));
+    const orgs = group.map((r) => cell(r, 'Practice_Name', 'Organization'));
+    const phones = group.map((r) => cell(r, 'Phone', 'Practice Phone'));
+    out.push({
+      ...primary,
+      Practice_Name: joinUnique(orgs),
+      Phone: joinUnique(phones.filter((p) => p)),
+    });
+  }
+
+  return out;
+}
+
+/**
+ * Filters an uploaded contacts CSV to practices within the size caps, merges
+ * duplicate org/owner rows, and rewrites dialer column order with NPPES enrichment.
  */
 export function filterUploadedContactsCsv(
   csvText: string,
@@ -501,21 +759,15 @@ export function filterUploadedContactsCsv(
   droppedOversize: number;
   unmatched: number;
   total: number;
+  rows: CsvRecord[];
 } {
   const maxBranches = opts.maxBranches ?? CONTACTS_CSV_MAX_BRANCHES;
   const maxProviders = opts.maxProviders ?? CONTACTS_CSV_MAX_PROVIDERS;
-  const { headers, rows } = parseContactsCsvText(csvText);
+  const { headers: rawHeaders, rows } = parseContactsCsvText(csvText);
 
-  if (!headers.length) {
-    return { csv: '', kept: 0, droppedOversize: 0, unmatched: 0, total: 0 };
+  if (!rawHeaders.length) {
+    return { csv: '', kept: 0, droppedOversize: 0, unmatched: 0, total: 0, rows: [] };
   }
-
-  const ensure = (name: string) => {
-    if (!headers.some((h) => h.toLowerCase() === name.toLowerCase())) headers.push(name);
-  };
-  ensure('NPI');
-  ensure('Branches');
-  ensure('Providers');
 
   const keptRows: CsvRecord[] = [];
   let droppedOversize = 0;
@@ -527,6 +779,7 @@ export function filterUploadedContactsCsv(
     const branches = fromDb?.branches ?? fromCsv.branches;
     const providers = fromDb?.providers ?? fromCsv.providers;
     const npi = fromDb?.npi ?? fromCsv.npi ?? '';
+    const taxonomyCode = fromDb?.taxonomy ?? fromCsv.taxonomy ?? '';
 
     if (branches == null || providers == null) {
       unmatched++;
@@ -537,26 +790,77 @@ export function filterUploadedContactsCsv(
       continue;
     }
 
-    const next: CsvRecord = { ...row };
-    // Write into the canonical column names we ensured above.
-    const npiHeader = headers.find((h) => h.toLowerCase() === 'npi') ?? 'NPI';
-    const branchesHeader = headers.find((h) => h.toLowerCase() === 'branches') ?? 'Branches';
-    const providersHeader = headers.find((h) => h.toLowerCase() === 'providers') ?? 'Providers';
-    next[npiHeader] = npi || next[npiHeader] || '';
-    next[branchesHeader] = String(branches);
-    next[providersHeader] = String(providers);
+    const next: CsvRecord = {};
+    for (const h of rawHeaders) next[h] = row[h] ?? '';
+
+    const practiceName =
+      cell(row, 'Practice_Name', 'Organization', 'Company Name', 'Company') || '';
+    const person =
+      cell(row, 'Authorized_Person', 'Decision Maker Name') ||
+      fromDb?.decisionMakerName ||
+      '';
+    const titleRaw =
+      cell(row, 'Authorized_Title', 'Decision Maker Title') ||
+      fromDb?.decisionMakerTitle ||
+      '';
+    const timezone =
+      fromDb?.timezone ||
+      cell(row, 'Time_Zone', 'Time Zone', 'Timezone') ||
+      '';
+
+    next['NPI'] = npi || cell(row, 'NPI', 'NPPES Number', 'NPPES', 'npi');
+    next['Practice_Name'] = practiceName;
+    next['Authorized_Person'] = person;
+    next['Authorized_Title'] = normalizeDecisionMakerTitle(titleRaw);
+    next['Phone'] = cell(row, 'Phone', 'Practice Phone') || '';
+    next['Address'] = fromDb?.address || cell(row, 'Address') || '';
+    next['City'] = cell(row, 'City') || '';
+    next['State'] = cell(row, 'State') || '';
+    next['ZIP'] = fromDb?.zip || cell(row, 'ZIP', 'Zip', 'Postal Code') || '';
+    next['taxonomy'] = formatTaxonomyCell(taxonomyCode) || cell(row, 'taxonomy', 'Taxonomy', 'Specialty');
+    next['Enumeration_Date'] =
+      fromDb?.enumerationDate ||
+      cell(row, 'Enumeration_Date', 'Enumeration Date') ||
+      '';
+    next['Time_Zone'] = timezone;
+    next['PKT_Call_Window'] = pktCallWindow(timezone);
+
+    next['Providers'] = String(providers);
+    next['Branches'] = String(branches);
+    if (!next['Tag']) next['Tag'] = cell(row, 'Tag');
+    if (!next['Score']) next['Score'] = cell(row, 'Score');
+    if (!next['Email']) next['Email'] = cell(row, 'Email');
+    if (!next['Website']) next['Website'] = fromDb?.website || cell(row, 'Website');
+    if (!next['LinkedIn']) next['LinkedIn'] = cell(row, 'LinkedIn');
+    if (fromDb?.gbpWebsite && !next['Website']) next['Website'] = fromDb.gbpWebsite;
+
     keptRows.push(next);
   }
 
+  const merged = mergeDialerCsvRows(keptRows);
+  const headers = reorderCsvHeaders([
+    ...rawHeaders,
+    ...PREFERRED_CSV_COLUMN_ORDER,
+  ]);
+
   const headerLine = headers.map((h) => csvCell(h)).join(',');
-  const body = keptRows.map((row) => headers.map((h) => csvCell(row[h] ?? '')).join(','));
+  const body = merged.map((row) => headers.map((h) => csvCell(row[h] ?? '')).join(','));
   const csv = [headerLine, ...body].join('\r\n') + '\r\n';
 
   return {
     csv,
-    kept: keptRows.length,
+    kept: merged.length,
     droppedOversize,
     unmatched,
     total: rows.length,
+    rows: merged,
   };
+}
+
+/** Rebuild CSV text from dialer rows after an optional Gemini pass. */
+export function buildDialerCsvFromRecords(rows: CsvRecord[], extraHeaders: string[] = []): string {
+  const headers = reorderCsvHeaders([...PREFERRED_CSV_COLUMN_ORDER, ...extraHeaders]);
+  const headerLine = headers.map((h) => csvCell(h)).join(',');
+  const body = rows.map((row) => headers.map((h) => csvCell(row[h] ?? '')).join(','));
+  return [headerLine, ...body].join('\r\n') + '\r\n';
 }

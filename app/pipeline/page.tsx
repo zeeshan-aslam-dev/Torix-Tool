@@ -2,10 +2,17 @@
 
 import { useCallback, useEffect, useState } from "react";
 import styles from "./page.module.css";
-import { FolderOpen, Play, CheckCircle2, RefreshCw, FileText, Flame, Globe, Users, Send, Download, Upload } from "lucide-react";
+import { FolderOpen, Play, CheckCircle2, RefreshCw, FileText, Flame, Globe, Users, Send, Download, Upload, KeyRound } from "lucide-react";
 import classNames from "classnames";
 import StateSelect from "../components/StateSelect";
 import AreaFilter, { Area, EMPTY_AREA, areaToRequest } from "../components/AreaFilter";
+import AiKeysModal, {
+  AiKeysState,
+  loadAiKeysFromStorage,
+  compactAiKeys,
+  countAiKeys,
+  EMPTY_AI_KEYS,
+} from "./AiKeysModal";
 
 const num = (value: number | undefined) => (value ?? 0).toLocaleString();
 const errorMessage = (error: unknown) => (error instanceof Error ? error.message : String(error));
@@ -90,6 +97,11 @@ export default function PipelinePage() {
   const [filterCsvFile, setFilterCsvFile] = useState<File | null>(null);
   const [filterCsvReady, setFilterCsvReady] = useState<{ csv: string; filename: string; rows: number } | null>(null);
   const [filterCsvBusy, setFilterCsvBusy] = useState(false);
+  const [useAiProviders, setUseAiProviders] = useState(false);
+  const [aiRowStart, setAiRowStart] = useState('');
+  const [aiRowEnd, setAiRowEnd] = useState('');
+  const [aiKeys, setAiKeys] = useState<AiKeysState>(EMPTY_AI_KEYS);
+  const [aiKeysModalOpen, setAiKeysModalOpen] = useState(false);
 
   const [hotThreshold, setHotThreshold] = useState(55);
   const [verifyThreshold, setVerifyThreshold] = useState(30);
@@ -118,6 +130,10 @@ export default function PipelinePage() {
   useEffect(() => {
     loadFiles();
   }, [loadFiles]);
+
+  useEffect(() => {
+    setAiKeys(loadAiKeysFromStorage());
+  }, []);
 
   const handleNextStep = () => {
     if (currentStep < STEPS.length - 1) {
@@ -358,23 +374,65 @@ export default function PipelinePage() {
       return;
     }
 
+    if (useAiProviders && countAiKeys(aiKeys) === 0) {
+      setAiKeysModalOpen(true);
+      addLog("Add at least one OpenRouter / Groq / Gemini API key before AI refresh.");
+      return;
+    }
+
     setFilterCsvBusy(true);
     setFilterCsvReady(null);
-    addLog(`Filtering ${filterCsvFile.name} to ≤2 branches and ≤15 providers...`);
+    const packed = compactAiKeys(aiKeys);
+    const rangeText =
+      useAiProviders && (aiRowStart.trim() || aiRowEnd.trim())
+        ? `, rows ${aiRowStart.trim() || '1'}-${aiRowEnd.trim() || 'end'}`
+        : '';
+    addLog(
+      `Editing ${filterCsvFile.name} (≤2 branches, ≤15 providers` +
+        `${useAiProviders
+          ? `, AI provider refresh on — ${packed.openrouter.length} OpenRouter, ${packed.groq.length} Groq, ${packed.gemini.length} Gemini key(s)${rangeText}`
+          : ''})...`
+    );
 
     try {
       const form = new FormData();
       form.append("file", filterCsvFile);
       form.append("maxBranches", "2");
       form.append("maxProviders", "15");
+      form.append("useAiProviders", useAiProviders ? "true" : "false");
+      form.append("useGeminiProviders", useAiProviders ? "true" : "false");
+      if (useAiProviders) {
+        form.append("openrouterKeys", JSON.stringify(packed.openrouter));
+        form.append("groqKeys", JSON.stringify(packed.groq));
+        form.append("geminiKeys", JSON.stringify(packed.gemini));
+        if (aiRowStart.trim()) form.append("aiRowStart", aiRowStart.trim());
+        if (aiRowEnd.trim()) form.append("aiRowEnd", aiRowEnd.trim());
+      }
 
       const res = await fetch("/api/pipeline/filter-csv", { method: "POST", body: form });
-      const data = await res.json();
+      const raw = await res.text();
+      let data: {
+        error?: string;
+        csv?: string;
+        filename?: string;
+        kept?: number;
+        message?: string;
+      };
+      try {
+        data = JSON.parse(raw);
+      } catch {
+        const snippet = raw.replace(/\s+/g, ' ').slice(0, 160);
+        throw new Error(
+          res.status === 504 || /timeout|gateway|504|502/i.test(snippet)
+            ? `Server/proxy timed out (HTTP ${res.status}). AI refresh ran too long — try fewer rows or re-run; nginx may need a higher proxy_read_timeout.`
+            : `Server returned non-JSON (HTTP ${res.status}): ${snippet || res.statusText}`
+        );
+      }
       if (!res.ok) throw new Error(data.error ?? res.statusText);
 
       setFilterCsvReady({
-        csv: data.csv,
-        filename: data.filename,
+        csv: data.csv ?? '',
+        filename: data.filename ?? 'filtered-contacts.csv',
         rows: data.kept ?? 0,
       });
       addLog(data.message ?? `Kept ${data.kept} rows.`);
@@ -415,6 +473,12 @@ export default function PipelinePage() {
 
   return (
     <div className="page-container">
+      <AiKeysModal
+        open={aiKeysModalOpen}
+        initial={aiKeys}
+        onClose={() => setAiKeysModalOpen(false)}
+        onSave={setAiKeys}
+      />
       <div className={styles.pipelineContainer}>
         <div>
           <h1>Lead Pipeline Runner</h1>
@@ -912,9 +976,8 @@ export default function PipelinePage() {
                   <div>
                     <strong>{contactsCsvReady.filename}</strong>
                     <div className={styles.hint}>
-                      Filtered CSV: unique orgs with ≤2 branches and ≤15 providers,
-                      distinct practice vs decision-maker phone, main office only —
-                      includes NPI, Branches and Providers columns
+                      Dialer CSV: NPI → Practice_Name → … → PKT_Call_Window, then Providers
+                      and the rest. ≤2 branches / ≤15 providers.
                     </div>
                   </div>
                   <button className="btn btn-primary" onClick={downloadContactsCsv}>
@@ -925,12 +988,11 @@ export default function PipelinePage() {
 
               <div className={styles.csvUpload}>
                 <div>
-                  <strong>Filter an existing contacts CSV</strong>
+                  <strong>Filter / edit an existing contacts CSV</strong>
                   <div className={styles.hint}>
-                    Upload a previously downloaded Step 4 CSV. Rows are matched to the
-                    database by NPI or organization, then kept only when they have
-                    ≤2 branches and ≤15 providers. Adds NPI / Branches / Providers
-                    columns when missing.
+                    Upload an old Step 4 CSV. Matches NPPES data, keeps ≤2 branches / ≤15
+                    providers, merges same-org dual owners and same-owner dual orgs, then
+                    writes dialer columns (NPI, Practice_Name, taxonomy, ZIP, PKT_Call_Window, …).
                   </div>
                   <input
                     type="file"
@@ -942,6 +1004,60 @@ export default function PipelinePage() {
                       setFilterCsvReady(null);
                     }}
                   />
+                  <label className={styles.checkboxRow} style={{ marginTop: 12 }}>
+                    <input
+                      type="checkbox"
+                      checked={useAiProviders}
+                      onChange={e => {
+                        const on = e.target.checked;
+                        setUseAiProviders(on);
+                        if (on && countAiKeys(aiKeys) === 0) setAiKeysModalOpen(true);
+                      }}
+                      disabled={isProcessing || filterCsvBusy}
+                    />
+                    Refresh provider counts with AI (rotates across multiple OpenRouter / Groq /
+                    Gemini keys on rate limits). Only rows with a Website can change.
+                  </label>
+                  {useAiProviders && (
+                    <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginTop: 8, flexWrap: 'wrap' }}>
+                      <span className={styles.hint} style={{ margin: 0 }}>
+                        Batch rows (1-indexed, only counting rows with a Website) — leave blank for
+                        all. Free API keys rate-limit after ~130 rows: run 1-130, download, then
+                        re-upload that same file with a fresh key and run 131-260, and so on.
+                      </span>
+                      <input
+                        type="number"
+                        min={1}
+                        placeholder="Start (e.g. 1)"
+                        value={aiRowStart}
+                        onChange={e => setAiRowStart(e.target.value)}
+                        disabled={isProcessing || filterCsvBusy}
+                        style={{ width: 130 }}
+                      />
+                      <span>to</span>
+                      <input
+                        type="number"
+                        min={1}
+                        placeholder="End (e.g. 130)"
+                        value={aiRowEnd}
+                        onChange={e => setAiRowEnd(e.target.value)}
+                        disabled={isProcessing || filterCsvBusy}
+                        style={{ width: 130 }}
+                      />
+                    </div>
+                  )}
+                  <button
+                    type="button"
+                    className="btn"
+                    style={{ marginTop: 10 }}
+                    disabled={isProcessing || filterCsvBusy}
+                    onClick={() => setAiKeysModalOpen(true)}
+                  >
+                    <KeyRound size={16} /> AI API keys
+                    {countAiKeys(aiKeys) > 0
+                      ? ` (${countAiKeys(aiKeys)} saved)`
+                      : ''}
+                  </button>
                 </div>
                 <button
                   className="btn"
