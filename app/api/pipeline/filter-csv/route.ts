@@ -218,12 +218,14 @@ export async function POST(req: Request) {
           fetch,
           rotator!
         );
+        let lastReason = '';
         if (looked.providerCount != null) {
           row['Providers'] = String(looked.providerCount);
           aiUpdated++;
         } else {
           aiFailed++;
-          const reason = (looked.evidence || 'unknown').slice(0, 120);
+          const reason = (looked.evidence || 'unknown').slice(0, 160);
+          lastReason = reason;
           failReasons.set(reason, (failReasons.get(reason) || 0) + 1);
         }
         // Progress update every 5 rows or at the end. Includes a checkpoint CSV
@@ -237,7 +239,9 @@ export async function POST(req: Request) {
             total: workRows.length,
             updated: aiUpdated,
             failed: aiFailed,
-            message: `Row ${rowIndex}/${workRows.length} — updated ${aiUpdated}, failed ${aiFailed}`,
+            message:
+              `Row ${rowIndex}/${workRows.length} — updated ${aiUpdated}, failed ${aiFailed}` +
+              (lastReason ? ` (last fail: ${lastReason})` : ''),
             csv: checkpointCsv,
             filename: `filtered-contacts-${new Date().toISOString().slice(0, 10)}.csv`,
             kept: result.kept,
