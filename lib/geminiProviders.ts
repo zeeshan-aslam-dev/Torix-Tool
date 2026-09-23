@@ -197,11 +197,9 @@ export class AiKeyRotator {
     return { key: this.bundle.openrouter[i], index: i };
   }
 
-  markOpenRouterLimited(index: number, cooldownMs = 20_000): void {
-    const ms = Math.max(3_000, Math.min(60_000, cooldownMs));
-    this.coolUntilOr[index] = Date.now() + ms;
+  markOpenRouterLimited(_index: number, _cooldownMs = 0): void {
     this.rotations++;
-    this.orIdx = (index + 1) % Math.max(1, this.bundle.openrouter.length);
+    this.orIdx = (this.orIdx + 1) % Math.max(1, this.bundle.openrouter.length);
   }
 
   async acquireGroq(maxWaitMs = 15_000): Promise<{ key: string; index: number } | null> {
@@ -224,11 +222,9 @@ export class AiKeyRotator {
     return { key: this.bundle.groq[i], index: i };
   }
 
-  markGroqLimited(index: number, cooldownMs = 12_000): void {
-    const ms = Math.max(2_000, Math.min(45_000, cooldownMs));
-    this.coolUntilGroq[index] = Date.now() + ms;
+  markGroqLimited(_index: number, _cooldownMs = 0): void {
     this.rotations++;
-    this.groqIdx = (index + 1) % Math.max(1, this.bundle.groq.length);
+    this.groqIdx = (this.groqIdx + 1) % Math.max(1, this.bundle.groq.length);
   }
 
   async acquireGemini(maxWaitMs = 15_000): Promise<{ key: string; index: number } | null> {
@@ -251,11 +247,9 @@ export class AiKeyRotator {
     return { key: this.bundle.gemini[i], index: i };
   }
 
-  markGeminiLimited(index: number, cooldownMs = 30_000): void {
-    const ms = Math.max(5_000, Math.min(90_000, cooldownMs));
-    this.coolUntilGemini[index] = Date.now() + ms;
+  markGeminiLimited(_index: number, _cooldownMs = 0): void {
     this.rotations++;
-    this.geminiIdx = (index + 1) % Math.max(1, this.bundle.gemini.length);
+    this.geminiIdx = (this.geminiIdx + 1) % Math.max(1, this.bundle.gemini.length);
   }
 
   summary(): string {
@@ -264,16 +258,6 @@ export class AiKeyRotator {
       `; rotations=${this.rotations}; cooldownWaits=${this.waits}`
     );
   }
-}
-
-function cooldownFromRetryAfter(res: Response, fallbackMs: number): number {
-  const h = res.headers.get('retry-after');
-  if (!h) return fallbackMs;
-  const sec = Number(h);
-  if (Number.isFinite(sec) && sec > 0) return Math.min(120_000, sec * 1000);
-  const when = Date.parse(h);
-  if (Number.isFinite(when)) return Math.min(120_000, Math.max(fallbackMs, when - Date.now()));
-  return fallbackMs;
 }
 
 export function htmlToPlainText(html: string): string {
@@ -400,7 +384,7 @@ async function askOpenRouter(
           const body = await res.text().catch(() => '');
           errors.push(`key#${slot.index + 1}/${model} HTTP ${res.status}`);
           if (isRateLimitStatus(res.status)) {
-            rotator.markOpenRouterLimited(slot.index, cooldownFromRetryAfter(res, 12_000));
+            rotator.markOpenRouterLimited(slot.index);
             rateLimitedThisKey = true;
             break;
           }
@@ -416,7 +400,7 @@ async function askOpenRouter(
           const msg = data.error.message;
           errors.push(`key#${slot.index + 1}/${model}: ${msg.slice(0, 100)}`);
           if (/rate.?limit|429|temporarily|overloaded/i.test(msg)) {
-            rotator.markOpenRouterLimited(slot.index, 12_000);
+            rotator.markOpenRouterLimited(slot.index);
             rateLimitedThisKey = true;
             break;
           }
@@ -436,7 +420,7 @@ async function askOpenRouter(
     }
 
     if (!rateLimitedThisKey) {
-      rotator.markOpenRouterLimited(slot.index, 4_000);
+      rotator.markOpenRouterLimited(slot.index);
     }
   }
 
@@ -481,12 +465,11 @@ async function askGroq(
         const body = await res.text().catch(() => '');
         errors.push(`key#${slot.index + 1} HTTP ${res.status}`);
         if (isRateLimitStatus(res.status)) {
-          rotator.markGroqLimited(slot.index, cooldownFromRetryAfter(res, 25_000));
-          await sleep(400);
+          rotator.markGroqLimited(slot.index);
           continue;
         }
         if (body) errors[errors.length - 1] += `: ${body.slice(0, 80)}`;
-        rotator.markGroqLimited(slot.index, 10_000);
+        rotator.markGroqLimited(slot.index);
         continue;
       }
 
@@ -496,13 +479,13 @@ async function askGroq(
       const text = data.choices?.[0]?.message?.content ?? '';
       if (!text.trim()) {
         errors.push(`key#${slot.index + 1}: empty`);
-        rotator.markGroqLimited(slot.index, 5_000);
+        rotator.markGroqLimited(slot.index);
         continue;
       }
       return { ...parseProviderCountJson(text), backend: 'groq' };
     } catch (e) {
       errors.push(`key#${slot.index + 1}: ${e instanceof Error ? e.message : String(e)}`);
-      rotator.markGroqLimited(slot.index, 8_000);
+      rotator.markGroqLimited(slot.index);
     }
   }
 
@@ -545,12 +528,11 @@ async function askGemini(
         const body = await res.text().catch(() => '');
         errors.push(`key#${slot.index + 1} HTTP ${res.status}`);
         if (isRateLimitStatus(res.status) || res.status === 403) {
-          rotator.markGeminiLimited(slot.index, cooldownFromRetryAfter(res, 30_000));
-          await sleep(400);
+          rotator.markGeminiLimited(slot.index);
           continue;
         }
         if (body) errors[errors.length - 1] += `: ${body.slice(0, 80)}`;
-        rotator.markGeminiLimited(slot.index, 10_000);
+        rotator.markGeminiLimited(slot.index);
         continue;
       }
 
@@ -560,13 +542,13 @@ async function askGemini(
       const text = data.candidates?.[0]?.content?.parts?.map((p) => p.text ?? '').join('') ?? '';
       if (!text.trim()) {
         errors.push(`key#${slot.index + 1}: empty`);
-        rotator.markGeminiLimited(slot.index, 5_000);
+        rotator.markGeminiLimited(slot.index);
         continue;
       }
       return { ...parseProviderCountJson(text), backend: 'gemini' };
     } catch (e) {
       errors.push(`key#${slot.index + 1}: ${e instanceof Error ? e.message : String(e)}`);
-      rotator.markGeminiLimited(slot.index, 8_000);
+      rotator.markGeminiLimited(slot.index);
     }
   }
 

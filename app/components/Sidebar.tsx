@@ -2,13 +2,14 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, Filter, Users, Phone, ReceiptText, Settings } from "lucide-react";
+import { LayoutDashboard, Filter, Users, Phone, ReceiptText, Settings, FileSpreadsheet } from "lucide-react";
 import classNames from "classnames";
 import styles from "./Sidebar.module.css";
 
 const navItems = [
   { name: "Dashboard", href: "/", icon: LayoutDashboard },
   { name: "Pipeline", href: "/pipeline", icon: Filter },
+  { name: "CSV Format", href: "/csv-format", icon: FileSpreadsheet },
   { name: "CRM Leads", href: "/crm", icon: Users },
   { name: "Dialer", href: "/dialer", icon: Phone },
   { name: "Clients", href: "/clients", icon: ReceiptText },

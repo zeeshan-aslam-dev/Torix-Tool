@@ -25,6 +25,18 @@ export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 export const maxDuration = 600;
 
+function streamLog(msg: string): string {
+  return JSON.stringify({ type: 'log', message: msg }) + '\n';
+}
+
+function streamUpdate(data: Record<string, unknown>): string {
+  return JSON.stringify({ type: 'update', ...data }) + '\n';
+}
+
+function streamDone(data: Record<string, unknown>): string {
+  return JSON.stringify({ type: 'done', ...data }) + '\n';
+}
+
 function readKeyBundleFromForm(form: FormData): Partial<AiKeyBundle> {
   return {
     openrouter: parseKeysField(form.get('openrouterKeys')),
@@ -181,7 +193,9 @@ export async function POST(req: Request) {
       const outOfRangeCount = eligibleRows.length - workRows.length;
       if (outOfRangeCount > 0) aiSkipped += outOfRangeCount;
 
+      let rowIndex = 0;
       await mapProviderCountLookups(workRows, concurrency, async (row) => {
+        rowIndex++;
         if (Date.now() >= aiDeadlineMs) {
           aiTimedOut = true;
           aiFailed++;
@@ -208,6 +222,11 @@ export async function POST(req: Request) {
           aiFailed++;
           const reason = (looked.evidence || 'unknown').slice(0, 120);
           failReasons.set(reason, (failReasons.get(reason) || 0) + 1);
+        }
+        // Progress update every 5 rows or at the end
+        if (rowIndex % 5 === 0 || rowIndex === workRows.length) {
+          // This would be where we'd send a progress event in streaming mode
+          // For now, just track progress internally
         }
       });
 

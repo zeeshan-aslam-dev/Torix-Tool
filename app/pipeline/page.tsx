@@ -97,6 +97,7 @@ export default function PipelinePage() {
   const [filterCsvFile, setFilterCsvFile] = useState<File | null>(null);
   const [filterCsvReady, setFilterCsvReady] = useState<{ csv: string; filename: string; rows: number } | null>(null);
   const [filterCsvBusy, setFilterCsvBusy] = useState(false);
+  const [filterCsvAbortController, setFilterCsvAbortController] = useState<AbortController | null>(null);
   const [useAiProviders, setUseAiProviders] = useState(false);
   const [aiRowStart, setAiRowStart] = useState('');
   const [aiRowEnd, setAiRowEnd] = useState('');
@@ -368,6 +369,15 @@ export default function PipelinePage() {
     if (filterCsvReady) downloadCsvFile(filterCsvReady);
   };
 
+  const cancelFilterCsv = () => {
+    if (filterCsvAbortController) {
+      filterCsvAbortController.abort();
+      setFilterCsvAbortController(null);
+      setFilterCsvBusy(false);
+      addLog("Filter CSV cancelled — download the partial results above if available.");
+    }
+  };
+
   const runFilterUploadedCsv = async () => {
     if (!filterCsvFile) {
       addLog("Pick a contacts CSV to filter first.");
@@ -394,6 +404,9 @@ export default function PipelinePage() {
           : ''})...`
     );
 
+    const abortController = new AbortController();
+    setFilterCsvAbortController(abortController);
+
     try {
       const form = new FormData();
       form.append("file", filterCsvFile);
@@ -409,37 +422,84 @@ export default function PipelinePage() {
         if (aiRowEnd.trim()) form.append("aiRowEnd", aiRowEnd.trim());
       }
 
-      const res = await fetch("/api/pipeline/filter-csv", { method: "POST", body: form });
-      const raw = await res.text();
-      let data: {
-        error?: string;
-        csv?: string;
-        filename?: string;
-        kept?: number;
-        message?: string;
-      };
-      try {
-        data = JSON.parse(raw);
-      } catch {
-        const snippet = raw.replace(/\s+/g, ' ').slice(0, 160);
-        throw new Error(
-          res.status === 504 || /timeout|gateway|504|502/i.test(snippet)
-            ? `Server/proxy timed out (HTTP ${res.status}). AI refresh ran too long — try fewer rows or re-run; nginx may need a higher proxy_read_timeout.`
-            : `Server returned non-JSON (HTTP ${res.status}): ${snippet || res.statusText}`
-        );
-      }
-      if (!res.ok) throw new Error(data.error ?? res.statusText);
-
-      setFilterCsvReady({
-        csv: data.csv ?? '',
-        filename: data.filename ?? 'filtered-contacts.csv',
-        rows: data.kept ?? 0,
+      // Use streaming endpoint for real-time logs
+      const res = await fetch("/api/pipeline/filter-csv-stream", {
+        method: "POST",
+        body: form,
+        signal: abortController.signal,
       });
-      addLog(data.message ?? `Kept ${data.kept} rows.`);
+
+      if (!res.ok || !res.body) {
+        throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let csvData: { csv?: string; filename?: string; kept?: number; message?: string } | null = null;
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines[lines.length - 1];
+
+        for (const line of lines.slice(0, -1)) {
+          if (!line.trim()) continue;
+          try {
+            const event = JSON.parse(line) as {
+              type: string;
+              message?: string;
+              current?: number;
+              total?: number;
+              updated?: number;
+              failed?: number;
+              csv?: string;
+              filename?: string;
+              kept?: number;
+              [key: string]: unknown;
+            };
+            if (event.type === 'log') {
+              addLog(event.message || '');
+            } else if (event.type === 'progress') {
+              addLog(event.message || `Row ${event.current}/${event.total}`);
+            } else if (event.type === 'done') {
+              csvData = {
+                csv: event.csv as string,
+                filename: event.filename as string,
+                kept: event.kept as number,
+                message: event.message as string,
+              };
+              addLog(event.message || 'Done.');
+            } else if (event.type === 'error') {
+              addLog(`Error: ${event.message || 'Unknown error'}`);
+            }
+          } catch (e) {
+            // Ignore parse errors in streaming
+          }
+        }
+      }
+
+      if (csvData?.csv) {
+        setFilterCsvReady({
+          csv: csvData.csv,
+          filename: csvData.filename ?? 'filtered-contacts.csv',
+          rows: csvData.kept ?? 0,
+        });
+      } else {
+        addLog("No CSV data received from server.");
+      }
     } catch (e) {
-      addLog(`Error: ${errorMessage(e)}`);
+      if (e instanceof Error && e.name === 'AbortError') {
+        addLog("Filter CSV cancelled by user.");
+      } else {
+        addLog(`Error: ${errorMessage(e)}`);
+      }
     } finally {
       setFilterCsvBusy(false);
+      setFilterCsvAbortController(null);
     }
   };
 
@@ -990,9 +1050,9 @@ export default function PipelinePage() {
                 <div>
                   <strong>Filter / edit an existing contacts CSV</strong>
                   <div className={styles.hint}>
-                    Upload an old Step 4 CSV. Matches NPPES data, keeps ≤2 branches / ≤15
-                    providers, merges same-org dual owners and same-owner dual orgs, then
-                    writes dialer columns (NPI, Practice_Name, taxonomy, ZIP, PKT_Call_Window, …).
+                    Size filter only: match NPPES, keep ≤2 branches / ≤15 providers, optional AI
+                    provider refresh. For dialer <em>column order</em> on any old CSV (no drops), use{' '}
+                    <a href="/csv-format">CSV Format</a> in the sidebar.
                   </div>
                   <input
                     type="file"
@@ -1059,13 +1119,20 @@ export default function PipelinePage() {
                       : ''}
                   </button>
                 </div>
-                <button
-                  className="btn"
-                  onClick={runFilterUploadedCsv}
-                  disabled={isProcessing || filterCsvBusy || !filterCsvFile}
-                >
-                  {filterCsvBusy ? 'Filtering...' : <><Upload size={16} /> Filter CSV</>}
-                </button>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button
+                    className="btn"
+                    onClick={runFilterUploadedCsv}
+                    disabled={isProcessing || filterCsvBusy || !filterCsvFile}
+                  >
+                    {filterCsvBusy ? 'Filtering...' : <><Upload size={16} /> Filter CSV</>}
+                  </button>
+                  {filterCsvBusy && (
+                    <button className="btn btn-danger" onClick={cancelFilterCsv}>
+                      Stop
+                    </button>
+                  )}
+                </div>
               </div>
 
               {filterCsvReady && (
